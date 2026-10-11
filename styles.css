@@ -91,3 +91,4 @@ section.adv h3{margin:0 0 .4rem;font-size:1rem}
 .chip.on.auto{background:transparent;color:var(--accent);border:2px dashed var(--accent)}
 .wk{padding:.35rem 0;border-bottom:1px dashed var(--line)}
 .card>details{border-top:0;padding-top:0}
+.updatebar{position:fixed;left:.75rem;right:.75rem;top:calc(3.2rem + env(safe-area-inset-top));z-index:20;background:var(--card);border:1px solid var(--accent);border-radius:12px;padding:.5rem .75rem;display:flex;align-items:center;justify-content:space-between;gap:.5rem;box-shadow:0 2px 8px rgba(0,0,0,.2)}

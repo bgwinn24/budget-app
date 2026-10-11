@@ -271,7 +271,7 @@ function checkinHTML(c, full) {
     <tr><td>Spent${c.budget ? ` <span class="muted small">of ${money(c.budget)} budget</span>` : ''}</td><td class="num ${c.budget && c.spent > c.budget ? 'bad' : ''}">${money(c.spent)}</td></tr>
     ${c.debtPaid ? `<tr><td>Debt paid</td><td class="num">${money(c.debtPaid)}</td></tr>` : ''}
     ${c.saved ? `<tr><td>Saved toward goals</td><td class="num">${money(c.saved)}</td></tr>` : ''}
-    ${(full ? c.cats : c.cats.filter(x => x.budget)).map(x => `<tr><td class="small">${h(x.name)}</td><td class="num small ${x.diff != null && x.diff < 0 ? 'bad' : ''}">${money(x.spent)}${x.diff != null ? ` · ${x.diff < 0 ? 'over ' + money(-x.diff) : 'under ' + money(x.diff)}` : ''}</td></tr>`).join('')}
+    ${(full ? (c.cats || []) : (c.cats || []).filter(x => x.budget)).map(x => `<tr><td class="small">${h(x.name)}</td><td class="num small ${x.diff != null && x.diff < 0 ? 'bad' : ''}">${money(x.spent)}${x.diff != null ? ` · ${x.diff < 0 ? 'over ' + money(-x.diff) : 'under ' + money(x.diff)}` : ''}</td></tr>`).join('')}
   </tbody></table>`;
 }
 /* ---------- subscriptions ---------- */
@@ -303,7 +303,7 @@ function detectSubs() {
     if (!(b.amount > 0)) continue;
     const bk = merchKey(b.name).split(' ')[0];
     const hit = bk && bk.length >= 3 ? S.transactions.filter(t => t.type !== 'income' && merchKey(t.importDesc || t.note).includes(bk)).sort((a, z) => z.date.localeCompare(a.date))[0] : null;
-    for (let i = out.length - 1; i >= 0; i--) if (bk && bk.length >= 3 && out[i].mk.includes(bk)) out.splice(i, 1);   // listed bill wins over detected copy
+    for (let i = out.length - 1; i >= 0; i--) if (bk && bk.length >= 3 && out[i].source === 'detected' && out[i].mk?.includes(bk)) out.splice(i, 1);   // listed bill wins over detected copy
     out.push({ key: 'bill:' + b.id, name: b.name || 'Bill', cadence: b.frequency, amount: b.amount, monthly: r2(b.amount * (PER_MONTH[b.frequency] || 1)), last: hit?.date || null, source: 'bill' });
   }
   return out.map(x => ({ ...x, yearly: r2(x.monthly * 12), status: S.subStatus[x.key] || null })).sort((a, b) => b.monthly - a.monthly);
@@ -313,11 +313,20 @@ function detectSubs() {
 let tab = 'home';
 const ui = { editTxn: null, txnMonth: today().slice(0, 7), txnCat: '', planPay: null, planDate: null, imp: null, logDebt: null };
 
+/* Render one section; if it throws, show a small note instead of blanking the whole tab. */
+function safe(label, fn) {
+  try { if (window.__failSection === label) throw new Error('simulated failure'); return fn(); }
+  catch (e) {
+    console.error(`[${label}] failed to render:`, e);
+    return `<div class="card alert warn section-error" data-section="${h(label)}"><b>${h(label)}</b> couldn't be shown (${h(e.message || 'error')}). The rest of the app still works; export a backup and report this.</div>`;
+  }
+}
 function render() {
   $$('.tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   document.documentElement.dataset.theme = S.settings.theme === 'auto' ? '' : S.settings.theme;
   if (S.settings.theme === 'auto') delete document.documentElement.dataset.theme;
-  $('#view').innerHTML = { home: viewHome, plan: viewPlan, spend: viewSpend, debts: viewDebts, more: viewMore }[tab]();
+  const views = { home: viewHome, plan: viewPlan, spend: viewSpend, debts: viewDebts, more: viewMore };
+  $('#view').innerHTML = safe({ home: 'Home', plan: 'Paycheck', spend: 'Spending', debts: 'Debts', more: 'More' }[tab], views[tab]);
   $('#title').textContent = { home: 'Budget', plan: 'Paycheck plan', spend: 'Spending', debts: 'Debts', more: 'More' }[tab];
 }
 
@@ -346,16 +355,16 @@ function viewHome() {
       ${y.url && y.connected ? `<button data-act="syncNow" id="homeSync">⟳ Sync now</button>` : ''}</div>
     ${y.url && y.connected && y.lastSync ? `<div class="small muted" style="margin-top:.3rem">Bank synced ${new Date(y.lastSync).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</div>` : ''}
   </div>
-  ${(() => { const c = dueCheckin(); return c ? `<div class="card" id="checkinCard"><div class="row"><h2 style="margin:0">Last week · ${fmtShort(c.ws)} – ${fmtShort(c.we)}</h2>
-    <button class="mini" data-act="dismissCheckin" data-ws="${c.ws}" style="flex:0 0 auto">Got it</button></div>${checkinHTML(c)}</div>` : ''; })()}
+  ${safe('Weekly check-in', () => { const c = dueCheckin(); return c ? `<div class="card" id="checkinCard"><div class="row"><h2 style="margin:0">Last week · ${fmtShort(c.ws)} – ${fmtShort(c.we)}</h2>
+    <button class="mini" data-act="dismissCheckin" data-ws="${c.ws}" style="flex:0 0 auto">Got it</button></div>${checkinHTML(c)}</div>` : ''; })}
   ${y.loginRequired ? consentCardHTML() : ''}
   ${overs.map(o => `<div class="alert">⚠ <b>${h(o.c.name)}</b> is over budget by ${money(o.s - o.c.budget)} ${o.c.period === 'month' ? 'this month' : 'this week'}.</div>`).join('')}
   ${days != null && days >= 0 ? `<div class="card compact"><b>${h(wn)}</b> · ${fmtDate(wd)} — ${days === 0 ? 'today! 🎉' : `${days} day${days === 1 ? '' : 's'} to go`}</div>` : ''}
   ${rows.length ? `<div class="card compact"><h2>Budgets</h2>${budgetHTML(rows)}</div>` : ''}
-  ${S.goals.length ? `<div class="card compact" id="homeGoals"><h2>Goals</h2>${S.goals.map(g => { const gs = goalStatus(g); return `<div class="budget">
+  ${safe('Goals', () => S.goals.length ? `<div class="card compact" id="homeGoals"><h2>Goals</h2>${S.goals.map(g => { const gs = goalStatus(g); return `<div class="budget">
     <div class="head"><span>${h(g.name)}${g.date ? ` <span class="tag">${gs.days < 0 ? 'past due' : fmtShort(g.date)}</span>` : ''}</span><span class="amt">${money(gs.saved)}${gs.target ? ' / ' + money(gs.target) : ''}</span></div>
     ${gs.target ? `<div class="bar"><i style="width:${gs.pct.toFixed(1)}%"></i></div>` : ''}
-    <div class="small muted">${gs.done ? 'Reached! 🎉' : gs.weekly ? `${money(gs.weekly)}/week needed` : gs.target ? 'Add a target date to see the weekly amount' : 'Add a target amount to see the weekly amount'}</div></div>`; }).join('')}</div>` : ''}
+    <div class="small muted">${gs.done ? 'Reached! 🎉' : gs.weekly ? `${money(gs.weekly)}/week needed` : gs.target ? 'Add a target date to see the weekly amount' : 'Add a target amount to see the weekly amount'}</div></div>`; }).join('')}</div>` : '')}
   ${S.debts.length ? `<div class="card compact"><h2>Debts <span class="muted small">· ${money(debtLeft)} left</span></h2><ul class="list">${S.debts.map(d => { const ds = debtStatus(d); return `<li><div class="grow"><div class="t">${h(d.name)}${d.bank ? ' <span class="tag">bank</span>' : ''}</div>
       <div class="small muted">${d.bank && d.dueDate ? `Due ${fmtShort(d.dueDate)}${d.payment ? ' · min ' + money(d.payment) : ''}` : ds.projected ? 'Payoff ~' + fmtDate(ds.projected) : 'Enter balance & payment'}${ds.behind ? ' <span class="tag bad">past end date</span>' : ''}</div></div>
       <span class="amt">${money(ds.remaining)}</span></li>`; }).join('')}</ul></div>` : ''}`;
@@ -538,7 +547,7 @@ function subsHTML() {
   const cancel = subs.filter(x => x.status === 'cancel');
   return `<div class="card" id="subsCard"><details data-keep="subsOpen" ${ui.subsOpen ? 'open' : ''}><summary><span style="font-size:1.05rem">Subscriptions &amp; recurring</span>
     <span class="muted small">· ${money(sum(subs, x => x.monthly))}/mo</span></summary>
-    <p class="small muted">Found from repeating charges (same merchant, steady amount, weekly/monthly/yearly) plus your listed bills. Marking one doesn't cancel anything; it's a reminder list for you.</p>
+    <p class="small muted">Found from repeating charges (same merchant, steady amount, weekly/monthly/yearly) plus your listed bills. Marking one doesn't cancel anything; it's just a to-do list for you to cancel it yourself.</p>
     <p class="small">Total <b>${money(sum(subs, x => x.monthly))}/mo</b> (${money(sum(subs, x => x.yearly))}/yr)${cancel.length ? ` · Planning to cancel <b class="good" id="cancelSave">${money(sum(cancel, x => x.yearly))}/yr</b>` : ''}</p>
     <ul class="list" id="subsList">${subs.map(x => `<li data-key="${h(x.key)}"><div class="grow"><div class="t">${h(x.name)} <span class="tag">${x.source === 'bill' ? 'bill' : FREQS[x.cadence]?.toLowerCase()}</span>${x.status === 'cancel' ? ' <span class="tag bad">cancel</span>' : x.status === 'keep' ? ' <span class="tag">keep</span>' : ''}</div>
       <div class="small muted">${money(x.monthly)}/mo · ${money(x.yearly)}/yr${x.last ? ' · last ' + fmtShort(x.last) : ''}</div></div>
@@ -552,8 +561,11 @@ function checkinsHTML() {
     </details></div>`;
 }
 function viewMore() {
+  return [['Savings goals', goalsHTML], ['Work weeks', workHTML], ['Subscriptions', subsHTML], ['Weekly check-ins', checkinsHTML],
+    ['Categories & settings', moreCoreHTML], ['Advanced', advancedHTML]].map(([l, f]) => safe(l, f)).join('');
+}
+function moreCoreHTML() {
   return `
-  ${goalsHTML()}${workHTML()}${subsHTML()}${checkinsHTML()}
   <div class="card"><h2>Categories &amp; budgets</h2>
     <p class="small muted">Leave budget blank for no limit. Weekly budgets reset on your week-start day.</p>
     <details ${ui.catsOpen ? 'open' : ''} data-keep="catsOpen"><summary>Edit ${S.categories.length} categories</summary>
@@ -569,13 +581,16 @@ function viewMore() {
       <div><label for="sTheme">Theme</label><select id="sTheme" data-set="theme">${opts([['auto', 'Match phone'], ['light', 'Light'], ['dark', 'Dark']], S.settings.theme)}</select></div></div>
     <div class="grid2"><div><label for="sCdName">Countdown event name (optional)</label><input id="sCdName" data-set="countdownName" placeholder="e.g. Vacation" value="${h(S.settings.countdownName || '')}"></div>
       <div><label for="sCdDate">Countdown date (optional)</label><input id="sCdDate" type="date" data-set="countdownDate" value="${h(S.settings.countdownDate || '')}"></div></div>
-    <p class="small muted">v2.1 · ${S.transactions.length} transactions stored on this device.</p></div>
+    <p class="small muted">v2.1 · ${S.transactions.length} transactions stored on this device.</p></div>`;
+}
+function advancedHTML() {
+  return `
   <div class="card"><details id="advanced" data-keep="advOpen" ${ui.advOpen || ui.imp ? 'open' : ''}><summary><span style="font-size:1.05rem">Advanced</span>
     <span class="muted small">· CSV import, rules, backup, bank sync</span></summary>
   <section class="adv"><h3>Import bank CSV</h3>
     <p class="small muted">Download transactions from your bank's online banking as CSV, then pick the file. Nothing leaves your phone.</p>
     <input type="file" id="csvFile" accept=".csv,text/csv,text/plain">
-    <div id="impArea">${importHTML()}</div></section>
+    <div id="impArea">${safe('CSV import', importHTML)}</div></section>
   <section class="adv"><h3>Auto-categorize rules</h3>
     <p class="small muted">If a bank description contains the keyword (not case sensitive), it gets that category. First match wins, top to bottom.</p>
     <div class="grid2"><input id="rKw" placeholder="keyword e.g. sheetz"><select id="rCat">${catOpts('')}</select></div>
@@ -587,7 +602,7 @@ function viewMore() {
     <div class="row"><button class="primary" data-act="export">Export backup (JSON)</button></div>
     <label for="restoreFile">Restore from backup file</label><input type="file" id="restoreFile" accept=".json,application/json">
     <details><summary class="bad">Danger zone</summary><button class="danger" data-act="reset">Erase all data &amp; start over</button></details></section>
-${syncCardHTML()}
+${safe('Bank sync', syncCardHTML)}
   </details></div>`;
 }
 
@@ -1031,7 +1046,20 @@ async function restore(file) {
 render();
 const net = () => $('#offline').classList.toggle('hidden', navigator.onLine);
 addEventListener('online', net); addEventListener('offline', net); net();
-if ('serviceWorker' in navigator) addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(err => console.warn('SW', err)));
+if ('serviceWorker' in navigator) {
+  // Check for a new version on load and whenever the app comes back to the foreground; offer a one-tap reload when it takes over.
+  const hadController = !!navigator.serviceWorker.controller; let reloading = false;
+  addEventListener('load', () => navigator.serviceWorker.register('./sw.js').then(reg => {
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') reg.update().catch(() => {}); });
+  }).catch(err => console.warn('SW', err)));
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController || reloading || $('#updateBar')) return;
+    const bar = document.createElement('div'); bar.id = 'updateBar'; bar.className = 'updatebar';
+    bar.innerHTML = 'A new version is ready. <button class="mini primary">Reload</button>';
+    bar.querySelector('button').onclick = () => { reloading = true; location.reload(); };
+    document.body.appendChild(bar);
+  });
+}
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 // Resume Plaid Link after an OAuth bank redirect, then auto-sync at most every 6 hours when connected.
 if (syncOn() && /[?&]oauth_state_id=/.test(location.search) && sessionStorage.getItem('plaidLinkToken')) {
