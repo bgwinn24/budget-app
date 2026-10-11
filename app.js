@@ -116,6 +116,10 @@ function migrate() {   // upgrade older saved data / backups in place
   if (!S.work || typeof S.work.days !== 'object') S.work = { days: {} };
   if (!Array.isArray(S.checkins)) S.checkins = [];
   if (!S.subStatus || typeof S.subStatus !== 'object') S.subStatus = {};
+  if (!Array.isArray(S.manualAccounts)) S.manualAccounts = [];
+  if (!Array.isArray(S.netWorthHist)) S.netWorthHist = [];
+  if (!Array.isArray(S.alertsSeen)) S.alertsSeen = [];
+  if (!Array.isArray(S.subKnown)) { S.subKnown = []; try { S.subKnown = detectSubs().filter(x => x.source === 'detected').map(x => x.key); } catch {} }   // existing ones aren't "new"
   if (!S.settings.autoWork) S.settings.autoWork = { on: false, days: [1, 2, 3, 4, 5], cats: S.categories.filter(c => /lodg|hotel/i.test(c.name)).map(c => c.id) };
 }
 let S = load(); migrate();
@@ -392,10 +396,12 @@ function detectSubs() {
     const med = [...gaps].sort((a, b) => a - b)[Math.floor(gaps.length / 2)];
     const cadence = med >= 5 && med <= 9 ? 'weekly' : med >= 12 && med <= 17 ? 'biweekly' : med >= 26 && med <= 35 ? 'monthly' : med >= 350 && med <= 380 ? 'yearly' : null;
     if (!cadence || gaps.some(g => Math.abs(g - med) > Math.max(3, med * 0.4))) continue;
-    const amts = arr.map(t => t.amount), avg = sum(amts) / amts.length;
-    if (Math.max(...amts) - Math.min(...amts) > Math.max(1, avg * 0.15)) continue;   // amount must be steady
-    const last = arr.at(-1);
-    out.push({ key: 'tx:' + k, name: last.note || k, cadence, amount: last.amount, monthly: r2(avg * PER_MONTH[cadence]), last: last.date, count: arr.length, source: 'detected', mk: k });
+    const last = arr.at(-1), prev = arr.at(-2), base = arr.length > 2 ? arr.slice(0, -1) : arr;
+    const amts = base.map(t => t.amount), avg = sum(amts) / amts.length;
+    if (Math.max(...amts) - Math.min(...amts) > Math.max(1, avg * 0.15)) continue;   // amount must be steady (latest charge may have gone up)
+    if (arr.length > 2 && (last.amount < avg * 0.85 || last.amount > avg * 1.5)) continue;
+    const priceUp = last.amount - prev.amount > 0.5 ? r2(last.amount - prev.amount) : 0;
+    out.push({ key: 'tx:' + k, name: last.note || k, cadence, amount: last.amount, monthly: r2(last.amount * PER_MONTH[cadence]), last: last.date, count: arr.length, source: 'detected', mk: k, priceUp, prevAmount: prev.amount });
   }
   for (const b of S.bills) {
     if (!(b.amount > 0)) continue;
@@ -405,6 +411,97 @@ function detectSubs() {
     out.push({ key: 'bill:' + b.id, name: b.name || 'Bill', cadence: b.frequency, amount: b.amount, monthly: r2(b.amount * (PER_MONTH[b.frequency] || 1)), last: hit?.date || null, source: 'bill' });
   }
   return out.map(x => ({ ...x, yearly: r2(x.monthly * 12), status: S.subStatus[x.key] || null })).sort((a, b) => b.monthly - a.monthly);
+}
+
+/* ---------- alerts (subscriptions) ---------- */
+function subAlerts() {
+  const out = [];
+  for (const x of detectSubs()) {
+    if (x.source !== 'detected') continue;
+    if (x.priceUp) { if (!S.alertsSeen.includes(`up:${x.key}:${x.last}`)) out.push({ id: `up:${x.key}:${x.last}`, key: x.key, text: `${x.name}: price went up to ${money(x.amount)} (was ${money(x.prevAmount)})` }); }
+    else if (!S.subKnown.includes(x.key)) out.push({ id: 'new:' + x.key, key: x.key, text: `New recurring charge: ${x.name} · ${money(x.amount)} ${FREQS[x.cadence]?.toLowerCase() || ''}` });
+  }
+  return out;
+}
+/* ---------- accounts + net worth ---------- */
+const ASSET_TYPES = ['depository', 'investment', 'brokerage'];
+function netWorth() {
+  const bank = S.sync.balances?.accounts || [];
+  const assets = sum(bank.filter(a => ASSET_TYPES.includes(a.type)), a => a.current) + sum(S.manualAccounts.filter(a => a.kind === 'asset'), a => a.balance);
+  const liab = sum(bank.filter(a => !ASSET_TYPES.includes(a.type)), a => a.current) + sum(S.manualAccounts.filter(a => a.kind === 'liability'), a => a.balance)
+    + sum(S.debts.filter(d => !d.bank), d => debtStatus(d).remaining);
+  return { assets: r2(assets), liab: r2(liab), net: r2(assets - liab), any: bank.length + S.manualAccounts.length + S.debts.length > 0 };
+}
+function snapNetWorth() {   // one snapshot per day (last write of the day wins)
+  const n = netWorth(); if (!n.any) return;
+  const d = today(), last = S.netWorthHist.at(-1);
+  if (last?.date === d) last.value = n.net; else S.netWorthHist.push({ date: d, value: n.net });
+  if (S.netWorthHist.length > 400) S.netWorthHist.splice(0, S.netWorthHist.length - 400);
+}
+function sparkline(vals, w = 300, hgt = 56) {
+  if (vals.length < 2) return '';
+  const min = Math.min(...vals), max = Math.max(...vals), span = max - min || 1;
+  const pts = vals.map((v, i) => `${(i / (vals.length - 1) * w).toFixed(1)},${(hgt - 4 - (v - min) / span * (hgt - 8)).toFixed(1)}`).join(' ');
+  return `<svg class="spark" viewBox="0 0 ${w} ${hgt}" preserveAspectRatio="none" aria-hidden="true"><polyline points="${pts}" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/></svg>`;
+}
+function netWorthCardHTML(compact) {
+  const n = netWorth(); if (!n.any) return '';
+  return `<div class="card compact" id="netWorthCard"><div class="row" style="align-items:baseline"><h2 style="margin:0">Net worth</h2>
+    ${compact ? '<button class="mini" data-act="goto" data-tab="accounts" style="flex:0 0 auto">Accounts →</button>' : ''}</div>
+    <div class="big ${n.net < 0 ? 'bad' : ''}" id="nwNum">${money(n.net)}</div>
+    <div class="small muted">Assets ${money(n.assets)} · Owed ${money(n.liab)}</div>${sparkline(S.netWorthHist.slice(-90).map(x => x.value))}</div>`;
+}
+const ACCT_GROUPS = [['Cash', a => a.type === 'depository'], ['Credit cards', a => a.type === 'credit'], ['Loans', a => a.type === 'loan'], ['Investments', a => ['investment', 'brokerage'].includes(a.type)], ['Other', a => !['depository', 'credit', 'loan', 'investment', 'brokerage'].includes(a.type)]];
+function viewAccounts() {
+  const b = S.sync.balances, acc = b?.accounts || [];
+  return `<button class="mini back" data-act="goto" data-tab="more">← More</button>
+  ${netWorthCardHTML(false)}
+  <div class="card" id="acctCard"><div class="row"><h2 style="margin:0">Bank accounts</h2>${S.sync.connected ? '<button class="mini" data-act="refreshBalances" style="flex:0 0 auto">Refresh</button>' : ''}</div>
+    ${b ? `<p class="small muted">${h(b.institution || 'Bank')} · updated ${new Date(b.at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</p>` : ''}
+    ${acc.length ? ACCT_GROUPS.map(([g, f]) => { const xs = acc.filter(f); return xs.length ? `<h3>${g}</h3><ul class="list">${xs.map(a => `<li><div class="grow"><div class="t">${h(a.name)}${a.mask ? ' ••' + h(a.mask) : ''}</div>
+      <div class="small muted">${h(a.subtype || a.type)}${a.available != null && a.type === 'depository' ? ' · available ' + money(a.available) : ''}${a.limit != null && a.type === 'credit' ? ' · limit ' + money(a.limit) : ''}</div></div>
+      <span class="amt ${a.type === 'credit' || a.type === 'loan' ? 'bad' : ''}">${money(a.current)}</span></li>`).join('')}</ul>` : ''; }).join('')
+    : `<p class="small muted">${S.sync.connected ? 'Tap Refresh to load balances.' : 'Connect your bank under More → Advanced → Bank sync to see balances here.'}</p>`}</div>
+  <div class="card" id="manualCard"><h2>Manual accounts</h2>
+    ${S.manualAccounts.length ? `<ul class="list">${S.manualAccounts.map(a => `<li data-id="${a.id}"><div class="grow"><div class="t">${h(a.name)}</div><div class="small muted">${a.kind === 'asset' ? 'Asset' : 'Owed'}</div></div>
+      <span class="amt">${money(a.balance)}</span><button class="mini danger" data-act="delManual" aria-label="Remove">✕</button></li>`).join('')}</ul>` : '<p class="small muted">Add cash, a car, a loan or anything not connected.</p>'}
+    <div class="grid2"><input id="maName" placeholder="Name e.g. Cash jar"><input id="maBal" inputmode="decimal" placeholder="Balance"></div>
+    <div class="row" style="margin-top:.5rem"><select id="maKind"><option value="asset">Asset (I own)</option><option value="liability">Owed (I owe)</option></select><button data-act="addManual">Add</button></div>
+    <p class="small muted">Manual debts from the Debts tab also count as owed.</p></div>`;
+}
+/* ---------- insights ---------- */
+const ym = d => d.slice(0, 7), monthName = m => parseISO(m + '-01').toLocaleDateString('en-US', { month: 'short' });
+const isSpend = t => { if (t.type === 'income' || t.plaidCatD === 'LOAN_PAYMENTS_CREDIT_CARD_PAYMENT') return false; const c = catById(t.categoryId); return !(c && (c.income || /transfer/i.test(c.name))); };
+function monthTotals(m) {
+  const by = new Map();
+  for (const t of S.transactions) if (ym(t.date) === m && isSpend(t)) by.set(t.categoryId, (by.get(t.categoryId) || 0) + t.amount);
+  return [...by].map(([id, v]) => ({ id, name: catName(id), v: r2(v) })).sort((a, b) => b.v - a.v);
+}
+function prevMonth(m, k = 1) { const d = parseISO(m + '-01'); d.setMonth(d.getMonth() - k); return iso(d).slice(0, 7); }
+function insights(m) {
+  const cur = monthTotals(m), prev = monthTotals(prevMonth(m)), out = [], pm = new Map(prev.map(x => [x.id, x.v]));
+  const tc = sum(cur, x => x.v), tp = sum(prev, x => x.v);
+  if (cur[0]) out.push(`Biggest category: <b>${h(cur[0].name)}</b> (${money(cur[0].v)}, ${Math.round(cur[0].v / tc * 100)}% of spending).`);
+  const moves = cur.filter(x => pm.get(x.id) > 0 && Math.abs(x.v - pm.get(x.id)) >= 20).map(x => ({ ...x, pct: (x.v - pm.get(x.id)) / pm.get(x.id) * 100 })).filter(x => Math.abs(x.pct) >= 15).sort((a, b) => Math.abs(b.pct) - Math.abs(a.pct));
+  if (moves[0]) out.push(`<b>${h(moves[0].name)}</b> is ${moves[0].pct > 0 ? 'up' : 'down'} ${Math.abs(Math.round(moves[0].pct))}% vs last month.`);
+  if (tp > 0 && tc > 0) out.push(`Total spending is ${tc >= tp ? 'up' : 'down'} ${money(Math.abs(tc - tp))} vs last month.`);
+  if (m === today().slice(0, 7) && out.length) out.push('<span class="muted">This month is still in progress.</span>');
+  return out;
+}
+function viewInsights() {
+  const months = [...new Set([today().slice(0, 7), ...S.transactions.map(t => ym(t.date))])].sort().reverse();
+  const m = ui.insMonth && months.includes(ui.insMonth) ? ui.insMonth : months[0];
+  const six = [5, 4, 3, 2, 1, 0].map(k => prevMonth(m, k)).map(x => ({ m: x, v: sum(monthTotals(x), y => y.v) })), max = Math.max(1, ...six.map(x => x.v));
+  const cats = monthTotals(m), tot = sum(cats, x => x.v), W = 300, H = 140, bw = W / 6;
+  return `<button class="mini back" data-act="goto" data-tab="more">← More</button>
+  <div class="card" id="insCard"><div class="row"><h2 style="margin:0">Spending</h2><select id="insMonth" aria-label="Month" style="flex:0 0 11rem">${opts(months.map(x => [x, parseISO(x + '-01').toLocaleDateString('en-US', { month: 'long', year: 'numeric' })]), m)}</select></div>
+    <div class="huge" style="font-size:2rem">${money(tot)}</div><div class="small muted">spent in ${parseISO(m + '-01').toLocaleDateString('en-US', { month: 'long' })} · excludes income &amp; transfers</div>
+    <svg class="chart" viewBox="0 0 ${W} ${H + 22}" role="img" aria-label="Monthly spending, last 6 months">${six.map((x, i) => { const bh = Math.max(2, x.v / max * H);
+      return `<rect x="${(i * bw + bw * .18).toFixed(1)}" y="${(H - bh).toFixed(1)}" width="${(bw * .64).toFixed(1)}" height="${bh.toFixed(1)}" rx="7" fill="var(--accent)" opacity="${x.m === m ? 1 : .35}"><title>${monthName(x.m)} ${money(x.v)}</title></rect>
+        <text x="${(i * bw + bw / 2).toFixed(1)}" y="${H + 16}" text-anchor="middle" font-size="11" fill="var(--muted)">${monthName(x.m)}</text>`; }).join('')}</svg></div>
+  <div class="card" id="insTips"><h2>Insights</h2>${insights(m).map(t => `<p class="small" style="margin:.35rem 0">💡 ${t}</p>`).join('') || '<p class="small muted">Add or sync a few weeks of spending to see insights.</p>'}</div>
+  <div class="card" id="insCats"><h2>By category</h2>${cats.map(c => `<div class="budget"><div class="head"><span>${h(c.name)}</span><span class="amt">${money(c.v)} <span class="muted small">${Math.round(c.v / tot * 100)}%</span></span></div>
+    <div class="bar"><i style="width:${(c.v / cats[0].v * 100).toFixed(1)}%;background:var(--accent)"></i></div></div>`).join('') || '<p class="small muted">No spending this month.</p>'}</div>`;
 }
 
 /* ---------- views ---------- */
@@ -447,9 +544,10 @@ function render() {
     if ($('#bgfx')) $('#bgfx').remove(); else document.body.insertAdjacentHTML('afterbegin', '<div id="bgfx" aria-hidden="true"></div>'); }
   document.body.classList.toggle('gated', !S.sync.session);
   if (!S.sync.session) { $('#view').innerHTML = gateHTML(); $('#title').textContent = 'Budget'; return mountGoogle(); }
-  const views = { home: viewHome, plan: viewPlan, spend: viewSpend, debts: viewDebts, more: viewMore };
-  $('#view').innerHTML = safe({ home: 'Home', plan: 'Paycheck', spend: 'Spending', debts: 'Debts', more: 'More' }[tab], views[tab]);
-  $('#title').textContent = { home: 'Dolla Overview', plan: 'Paycheck plan', spend: 'Spending', debts: 'Debts', more: 'More' }[tab];
+  const views = { home: viewHome, plan: viewPlan, spend: viewSpend, debts: viewDebts, more: viewMore, insights: viewInsights, accounts: viewAccounts };
+  $$('.tabs button').forEach(b => { if (['insights', 'accounts'].includes(tab)) b.classList.toggle('active', b.dataset.tab === 'more'); });
+  $('#view').innerHTML = safe({ home: 'Home', plan: 'Paycheck', spend: 'Spending', debts: 'Debts', more: 'More', insights: 'Insights', accounts: 'Accounts' }[tab], views[tab]);
+  $('#title').textContent = { home: 'Dolla Overview', plan: 'Paycheck plan', spend: 'Spending', debts: 'Debts', more: 'More', insights: 'Insights', accounts: 'Accounts' }[tab];
 }
 
 function gateHTML() {
@@ -509,6 +607,9 @@ function viewHome() {
   ${safe('Weekly check-in', () => { const c = dueCheckin(); return c ? `<div class="card" id="checkinCard"><div class="row"><h2 style="margin:0">Last week · ${fmtShort(c.ws)} – ${fmtShort(c.we)}</h2>
     <button class="mini" data-act="dismissCheckin" data-ws="${c.ws}" style="flex:0 0 auto">Got it</button></div>${checkinHTML(c)}</div>` : ''; })}
   ${y.loginRequired ? consentCardHTML() : ''}
+  ${safe('Alerts', () => { const a = subAlerts(); return a.length ? `<div class="alert warn" id="subAlerts">${a.slice(0, 3).map(x => `<div>🔔 ${h(x.text)}</div>`).join('')}${a.length > 3 ? `<div class="small">+${a.length - 3} more in More → Subscriptions</div>` : ''}
+    <div class="row" style="margin-top:.4rem"><button class="mini" data-act="dismissAlerts" style="flex:0 0 auto">Got it</button></div></div>` : ''; })}
+  ${safe('Net worth', () => netWorthCardHTML(true))}
   ${overs.map(o => `<div class="alert">⚠ <b>${h(o.c.name)}</b> is over budget by ${money(o.s - o.c.budget)} ${o.c.period === 'month' ? 'this month' : 'this week'}.</div>`).join('')}
   ${days != null && days >= 0 ? `<div class="card compact"><b>${h(wn)}</b> · ${fmtDate(wd)} — ${days === 0 ? 'today! 🎉' : `${days} day${days === 1 ? '' : 's'} to go`}</div>` : ''}
   ${rows.length ? `<div class="card compact"><h2>Budgets</h2>${budgetHTML(rows)}</div>` : ''}
@@ -713,7 +814,7 @@ function subsHTML() {
     <span class="muted small">· ${money(sum(subs, x => x.monthly))}/mo</span></summary>
     <p class="small muted">Found from repeating charges (same merchant, steady amount, weekly/monthly/yearly) plus your listed bills. Marking one doesn't cancel anything; it's just a to-do list for you to cancel it yourself.</p>
     <p class="small">Total <b>${money(sum(subs, x => x.monthly))}/mo</b> (${money(sum(subs, x => x.yearly))}/yr)${cancel.length ? ` · Planning to cancel <b class="good" id="cancelSave">${money(sum(cancel, x => x.yearly))}/yr</b>` : ''}</p>
-    <ul class="list" id="subsList">${subs.map(x => `<li data-key="${h(x.key)}"><div class="grow"><div class="t">${h(x.name)} <span class="tag">${x.source === 'bill' ? 'bill' : FREQS[x.cadence]?.toLowerCase()}</span>${x.status === 'cancel' ? ' <span class="tag bad">cancel</span>' : x.status === 'keep' ? ' <span class="tag">keep</span>' : ''}</div>
+    <ul class="list" id="subsList">${subs.map(x => `<li data-key="${h(x.key)}"><div class="grow"><div class="t">${h(x.name)} <span class="tag">${x.source === 'bill' ? 'bill' : FREQS[x.cadence]?.toLowerCase()}</span>${x.priceUp ? ` <span class="tag bad">price went up +${money(x.priceUp)}</span>` : ''}${x.source === 'detected' && !S.subKnown?.includes(x.key) ? ' <span class="tag warn">new</span>' : ''}${x.status === 'cancel' ? ' <span class="tag bad">cancel</span>' : x.status === 'keep' ? ' <span class="tag">keep</span>' : ''}</div>
       <div class="small muted">${money(x.monthly)}/mo · ${money(x.yearly)}/yr${x.last ? ' · last ' + fmtShort(x.last) : ''}</div></div>
       <button class="mini" data-act="setSub" data-v="keep">Keep</button><button class="mini danger" data-act="setSub" data-v="cancel">Cancel</button></li>`).join('') || '<li class="muted small">Nothing recurring found yet. Needs at least 2 charges.</li>'}</ul>
     </details></div>`;
@@ -725,7 +826,8 @@ function checkinsHTML() {
     </details></div>`;
 }
 function viewMore() {
-  return [['Account', accountHTML], ['Savings goals', goalsHTML], ['Work weeks', workHTML], ['Subscriptions', subsHTML], ['Weekly check-ins', checkinsHTML],
+  const nav = () => `<div class="card compact" id="moreNav"><div class="row"><button data-act="goto" data-tab="insights">📊 Insights</button><button data-act="goto" data-tab="accounts">🏦 Accounts</button></div></div>`;
+  return [['Explore', nav], ['Account', accountHTML], ['Savings goals', goalsHTML], ['Work weeks', workHTML], ['Subscriptions', subsHTML], ['Weekly check-ins', checkinsHTML],
     ['Categories & settings', moreCoreHTML], ['Advanced', advancedHTML]].map(([l, f]) => safe(l, f)).join('');
 }
 function moreCoreHTML() {
@@ -1031,6 +1133,8 @@ async function syncNow(quiet) {
     let cards = 0;
     try { cards = applyCards(await syncApi('liabilities')); }
     catch (e) { if (e.code === 'NOT_CONNECTED' || e.code === 'ITEM_LOGIN_REQUIRED') throw e; console.warn('card details unavailable', e.message); }
+    try { S.sync.balances = await syncApi('balances'); } catch (e) { if (e.code === 'ITEM_LOGIN_REQUIRED') throw e; console.warn('balances', e.message); }
+    snapNetWorth();
     S.sync.lastSync = new Date().toISOString(); S.sync.loginRequired = false; save(); render();
     if (loading && !tot.added) {   // first minutes after connecting: history not ready yet; check again automatically
       syncMsg('Your bank is still sending your transactions. This can take a few minutes; we will check again automatically.');
@@ -1110,6 +1214,13 @@ Object.assign(actions_sync, {
     catch (e) { toast(e.message); syncMsg(e.message); }
   },
   syncNow: () => syncNow(false),
+  refreshBalances: async () => { try { S.sync.balances = await syncApi('balances'); snapNetWorth(); save(); render(); toast('Balances updated'); } catch (e) { toast(e.message); } },
+  addManual: () => { const name = $('#maName').value.trim(), bal = num($('#maBal').value);
+    if (!name || bal == null) return toast('Enter a name and balance.');
+    S.manualAccounts.push({ id: uid(), name, kind: $('#maKind').value, balance: r2(Math.abs(bal)) }); snapNetWorth(); save(); render(); },
+  delManual: el => { const a = S.manualAccounts.find(x => x.id === el.closest('[data-id]').dataset.id); if (a && confirm(`Remove "${a.name}"?`)) { S.manualAccounts = S.manualAccounts.filter(x => x !== a); snapNetWorth(); save(); render(); } },
+  dismissAlerts: () => { for (const a of subAlerts()) { if (a.id.startsWith('up:')) S.alertsSeen.push(a.id); if (!S.subKnown.includes(a.key)) S.subKnown.push(a.key); }
+    S.alertsSeen = S.alertsSeen.slice(-200); save(); render(); },
   resort: async () => {   // re-categorize only uncategorized bank transactions; keyword rules first, then Plaid's category
     const bank = S.transactions.filter(t => t.plaidId && t.source === 'bank' && !t.resorted && isUncat(t));
     if (!bank.length) return toast('Nothing to re-sort.');
@@ -1253,6 +1364,7 @@ document.addEventListener('change', async e => {
   const el = e.target;
   if (el.dataset.act === 'toggleDebts') return actions.toggleDebts(el);
   if (el.id === 'fMonth') { ui.txnMonth = el.value; return render(); }
+  if (el.id === 'insMonth') { ui.insMonth = el.value; return render(); }
   if (el.id === 'fCat') { ui.txnCat = el.value; return render(); }
   if (el.id === 'csvFile') return onCsvFile(el.files[0]);
   if (el.id === 'restoreFile') return restore(el.files[0]);

@@ -161,3 +161,23 @@ details summary{list-style-position:outside}
 #gate a{color:var(--accent);text-decoration:none;font-weight:500}
 body.gated .topbar{display:none} body.gated main{padding-top:var(--s5)}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+
+/* ---------- v3.0: rounder edges + charts ---------- */
+:root{--r:20px;--r-sm:14px}
+.card{border-radius:var(--r)}
+input,select,textarea{border-radius:var(--r-sm)}
+button,.btn{border-radius:var(--r-sm)}
+button.primary,#gate button[type=submit]{border-radius:999px}
+button.mini{border-radius:999px;padding:.25rem .75rem}
+.chip,.tag,.pill{border-radius:999px}
+.seg{border-radius:999px;padding:3px;gap:3px;background:var(--input)} .seg button{border-radius:999px}
+.tabs{border-radius:22px 22px 0 0;overflow:hidden;box-shadow:0 -4px 18px -10px rgba(0,0,0,.25)}
+.toast,.updatebar{border-radius:18px}
+.alert{border-radius:14px}
+.bar,.bar>i{border-radius:999px}
+.fab{border-radius:999px}
+#gate .logo{border-radius:26px}
+.spark{display:block;width:100%;height:56px;margin-top:var(--s2)}
+.chart{display:block;width:100%;height:auto;margin-top:var(--s3)}
+button.back{margin:0 0 var(--s3);width:auto}
+#moreNav .row>button{min-height:52px;font-weight:600}
