@@ -11,6 +11,9 @@ The app must be served over HTTPS. Open the URL in Chrome, then use the menu and
 ## Updating
 After changing any file, bump `VERSION` in `sw.js` so phones pick up the new files. Re-open the app twice to get the update.
 
+## Optional bank sync (v2)
+More → Bank sync. This needs your own sync server: a Cloudflare Worker that talks to Plaid. It stays hidden and unused until a server URL is entered. The phone never stores bank logins or Plaid access tokens.
+
 ## Backups
 More → Backup & restore → Export backup (JSON). Keep a copy off the phone. If you clear Chrome site data or uninstall the app, the data on the phone is deleted.
 

@@ -79,13 +79,15 @@ function defaults() {
     transactions: [],
     debts: [],
     rules,
-    csvMappings: {}
+    csvMappings: {},
+    sync: blankSync()
   };
 }
+const blankSync = () => ({ url: '', passcode: '', key: '', cursor: '', connected: false, institution: null, lastSync: null, accounts: [] });
 function load() {
   try {
     const raw = localStorage.getItem(KEY);
-    if (raw) { const d = defaults(), s = JSON.parse(raw); return { ...d, ...s, settings: { ...d.settings, ...(s.settings || {}) } }; }
+    if (raw) { const d = defaults(), s = JSON.parse(raw); return { ...d, ...s, settings: { ...d.settings, ...(s.settings || {}) }, sync: { ...blankSync(), ...(s.sync || {}) } }; }
   } catch (e) { console.error(e); }
   return defaults();
 }
@@ -268,7 +270,7 @@ function viewSpend() {
       <select id="fCat" aria-label="Category">${catOpts(ui.txnCat, 'All categories')}</select></div>
     <p class="small muted">Out: <b>${money(out)}</b> · In: <b>${money(inc)}</b> · ${list.length} item${list.length === 1 ? '' : 's'}</p>
     <ul class="list" id="txnList">${list.map(t => `<li data-id="${t.id}"><div class="grow"><div class="t">${h(t.note || catName(t.categoryId))}</div>
-      <div class="small muted">${fmtShort(t.date)} · ${h(catName(t.categoryId))}${t.source === 'import' ? ' · imported' : ''}</div></div>
+      <div class="small muted">${fmtShort(t.date)} · ${h(catName(t.categoryId))}${t.source === 'import' ? ' · imported' : t.source === 'bank' ? ' · bank' : ''}${t.pending ? ' <span class="tag">pending</span>' : ''}</div></div>
       <span class="amt ${t.type === 'income' ? 'good' : ''}">${t.type === 'income' ? '+' : ''}${money(t.amount)}</span>
       <button class="mini" data-act="editTxn" aria-label="Edit">✎</button><button class="mini danger" data-act="delTxn" aria-label="Delete">✕</button></li>`).join('') || '<li class="muted small">Nothing here yet.</li>'}</ul></div>`;
 }
@@ -329,6 +331,7 @@ function viewMore() {
     <div class="row"><button class="primary" data-act="export">Export backup (JSON)</button></div>
     <label for="restoreFile">Restore from backup file</label><input type="file" id="restoreFile" accept=".json,application/json">
     <details><summary class="bad">Danger zone</summary><button class="danger" data-act="reset">Erase all data &amp; start over</button></details></div>
+${syncCardHTML()}
   <div class="card"><h2>Settings</h2>
     <div class="grid2"><div><label for="sWeek">Week starts on</label><select id="sWeek" data-set="weekStart">${opts(['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].map((d, i) => [i, d]), S.settings.weekStart)}</select></div>
       <div><label for="sTheme">Theme</label><select id="sTheme" data-set="theme">${opts([['auto', 'Match phone'], ['light', 'Light'], ['dark', 'Dark']], S.settings.theme)}</select></div></div>
@@ -433,7 +436,7 @@ function buildPreview() {
     if (!date) return { i, ok: false };
     let categoryId = autoCat(desc);
     if (!categoryId && type === 'income') categoryId = S.categories.find(c => c.income)?.id || null;
-    const dup = existing.has(dupKey(date, amt, type, desc));
+    const dup = existing.has(dupKey(date, amt, type, desc)) || S.transactions.some(t => t.plaidId && t.type === type && Math.abs(t.amount - amt) < 0.005 && Math.abs(dayDiff(t.date, date)) <= 3);
     return { i, ok: true, date, desc, amount: r2(amt), type, categoryId, dup, on: !dup };
   });
 }
@@ -458,6 +461,133 @@ function doImport() {
   save(); ui.imp = null; toast(`Imported ${n} transaction${n === 1 ? '' : 's'}`);
   render(); const f = $('#csvFile'); if (f) f.value = '';
 }
+
+const actions_sync = {};
+/* ---------- bank sync (optional; only active when a Worker URL is set) ---------- */
+const PLAID_JS = 'https://cdn.plaid.com/link/v2/stable/link-initialize.js';
+const dayDiff = (a, b) => Math.round((parseISO(a) - parseISO(b)) / 864e5);
+const syncOn = () => !!S.sync.url;
+function syncCardHTML() {
+  const y = S.sync, on = syncOn();
+  return `<div class="card" id="syncCard"><h2>Bank sync <span class="tag">optional</span></h2>
+    <details ${on ? 'open' : ''}><summary>${on ? (y.connected ? `Connected${y.institution ? ' to ' + h(y.institution) : ''}` : 'Not connected') : 'Set up automatic bank sync (advanced)'}</summary>
+    <p class="small muted">Uses your own sync server (a free Cloudflare Worker) and Plaid. Your bank login goes only to Plaid; this phone never stores bank credentials or access tokens.</p>
+    <label for="syUrl">Sync server URL</label><input id="syUrl" type="url" inputmode="url" placeholder="https://….workers.dev" value="${h(y.url)}" autocomplete="off">
+    <label for="syPass">App passcode</label><input id="syPass" type="password" value="${h(y.passcode)}" autocomplete="off">
+    <div class="row" style="margin-top:.6rem"><button data-act="syncSave">Save</button></div>
+    ${on ? `<p class="small">${y.lastSync ? 'Last sync: ' + new Date(y.lastSync).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : 'Never synced'}
+      ${y.accounts?.length ? '<br>Accounts: ' + y.accounts.map(a => h(`${a.name || 'Account'}${a.mask ? ' ••' + a.mask : ''}`)).join(', ') : ''}</p>
+      <div class="row">${y.connected ? `<button class="primary" data-act="syncNow">Sync now</button><button class="danger" data-act="syncDisconnect">Disconnect</button>`
+        : `<button class="primary" data-act="syncConnect">Connect bank</button>`}</div>
+      <p class="small muted" id="syncMsg"></p>` : ''}
+    </details></div>`;
+}
+async function syncApi(path, body = {}) {
+  const y = S.sync;
+  if (!y.key) { const b = crypto.getRandomValues(new Uint8Array(32)); y.key = [...b].map(x => x.toString(16).padStart(2, '0')).join(''); save(); }
+  let res;
+  try {
+    res = await fetch(y.url.replace(/\/+$/, '') + '/' + path, { method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-App-Passcode': y.passcode, 'X-Sync-Key': y.key }, body: JSON.stringify(body) });
+  } catch { throw Object.assign(new Error('Could not reach the sync server. Are you online?'), { code: 'NETWORK' }); }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw Object.assign(new Error(data.error || `Sync server error ${res.status}`), { code: data.code, status: res.status });
+  return data;
+}
+function loadPlaid() {
+  if (window.Plaid) return Promise.resolve(window.Plaid);
+  return new Promise((ok, bad) => { const sc = document.createElement('script'); sc.src = PLAID_JS;
+    sc.onload = () => window.Plaid ? ok(window.Plaid) : bad(new Error('Plaid failed to load')); sc.onerror = () => bad(new Error('Could not load Plaid. Check your connection.'));
+    document.head.appendChild(sc); });
+}
+function syncMsg(t) { const m = $('#syncMsg'); if (m) m.textContent = t; }
+async function openLink(token, receivedRedirectUri) {
+  const Plaid = await loadPlaid();
+  const handler = Plaid.create({ token, ...(receivedRedirectUri ? { receivedRedirectUri } : {}),
+    onSuccess: async (publicToken, meta) => {
+      sessionStorage.removeItem('plaidLinkToken');
+      try {
+        const r = await syncApi('exchange', { public_token: publicToken, institution: meta?.institution?.name || null });
+        Object.assign(S.sync, { connected: true, institution: r.institution, cursor: '' }); save(); render();
+        await syncNow();
+      } catch (e) { toast(e.message); }
+    },
+    onExit: err => { sessionStorage.removeItem('plaidLinkToken'); if (err) toast(err.display_message || err.error_message || 'Bank connection cancelled'); } });
+  handler.open();
+}
+let syncing = false;
+async function syncNow(quiet) {
+  if (syncing || !syncOn() || !S.sync.connected) return; syncing = true; syncMsg('Syncing…');
+  const tot = { added: 0, matched: 0, updated: 0, removed: 0 };
+  try {
+    for (let i = 0; i < 20; i++) {
+      const r = await syncApi('sync', { cursor: S.sync.cursor || '' });
+      const c = applySync(r); for (const k in tot) tot[k] += c[k];
+      if (r.accounts?.length) S.sync.accounts = r.accounts;
+      S.sync.cursor = r.next_cursor; save();            // cursor saved only after the batch is applied
+      if (!r.has_more) break;
+    }
+    S.sync.lastSync = new Date().toISOString(); save(); render();
+    if (!quiet || tot.added) toast(`Bank sync: ${tot.added} new, ${tot.matched} matched, ${tot.updated} updated, ${tot.removed} removed`);
+  } catch (e) {
+    if (e.code === 'NOT_CONNECTED') { S.sync.connected = false; save(); render(); }
+    if (!quiet) toast(e.code === 'ITEM_LOGIN_REQUIRED' ? 'Your bank needs you to log in again: Disconnect, then Connect bank.' : e.message);
+    syncMsg(e.message);
+  } finally { syncing = false; }
+}
+/* Merge a /sync response into S.transactions. Returns counts. Pure apart from mutating S. */
+function applySync(r) {
+  const n = { added: 0, matched: 0, updated: 0, removed: 0 };
+  const incomeCat = S.categories.find(c => c.income)?.id, otherCat = S.categories.find(c => c.name === 'Other')?.id || '';
+  for (const b of [...(r.added || []), ...(r.modified || [])]) {
+    if (!b || !b.transaction_id || !b.date || !b.amount) continue;
+    const type = b.amount > 0 ? 'expense' : 'income', amount = r2(Math.abs(b.amount)), desc = b.name || b.merchant_name || '';
+    // 1) same Plaid id, or the posted version of a pending one we already have
+    let t = S.transactions.find(x => x.plaidId === b.transaction_id)
+      || (b.pending_transaction_id && S.transactions.find(x => x.plaidId === b.pending_transaction_id));
+    if (t) { Object.assign(t, { plaidId: b.transaction_id, date: b.date, amount, type, pending: !!b.pending }); if (t.source === 'bank') t.importDesc = desc; n.updated++; continue; }
+    // 2) soft match against manual / CSV / debt entries: same direction, same amount, within 3 days (closest wins)
+    const cand = S.transactions.filter(x => !x.plaidId && x.type === type && Math.abs(x.amount - amount) < 0.005 && Math.abs(dayDiff(x.date, b.date)) <= 3)
+      .sort((x, y) => Math.abs(dayDiff(x.date, b.date)) - Math.abs(dayDiff(y.date, b.date)))[0];
+    if (cand) { cand.plaidId = b.transaction_id; cand.pending = !!b.pending; n.matched++; continue; }
+    // 3) new
+    S.transactions.push({ id: uid(), date: b.date, amount, type, pending: !!b.pending,
+      categoryId: autoCat(`${desc} ${b.merchant_name || ''}`) || (type === 'income' ? incomeCat : otherCat) || '',
+      note: b.merchant_name || desc, importDesc: desc, source: 'bank', plaidId: b.transaction_id, created: Date.now() + n.added });
+    n.added++;
+  }
+  for (const x of r.removed || []) {
+    const t = S.transactions.find(y => y.plaidId === x.transaction_id); if (!t) continue;
+    if (t.source === 'bank') S.transactions = S.transactions.filter(y => y !== t);
+    else { delete t.plaidId; delete t.pending; }   // never delete something you entered yourself
+    n.removed++;
+  }
+  return n;
+}
+Object.assign(actions_sync, {
+  syncSave: () => {
+    const url = $('#syUrl').value.trim(), pass = $('#syPass').value;
+    if (url && !/^https:\/\/|^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/.test(url)) return toast('The sync server URL must start with https://');
+    const changed = url !== S.sync.url;
+    S.sync.url = url; S.sync.passcode = pass;
+    if (changed) Object.assign(S.sync, { connected: false, institution: null, cursor: '', accounts: [] });
+    save(); render();
+    if (url) syncApi('status').then(st => { Object.assign(S.sync, { connected: st.connected, institution: st.institution }); save(); render(); toast(st.connected ? 'Connected' : 'Sync server OK'); })
+      .catch(e => { toast(e.message); syncMsg(e.message); });
+  },
+  syncConnect: async () => {
+    try { syncMsg('Opening Plaid…'); const { link_token } = await syncApi('link-token');
+      sessionStorage.setItem('plaidLinkToken', link_token); await openLink(link_token); syncMsg(''); }
+    catch (e) { toast(e.message); syncMsg(e.message); }
+  },
+  syncNow: () => syncNow(false),
+  syncDisconnect: async () => {
+    if (!confirm('Disconnect your bank? Transactions already synced stay in the app.')) return;
+    try { await syncApi('remove'); } catch (e) { if (e.code !== 'NOT_CONNECTED' && !confirm(`${e.message}\n\nForget the connection on this phone anyway?`)) return; }
+    S.transactions.forEach(t => { delete t.plaidId; delete t.pending; });   // a reconnect gets new ids; soft-match will relink
+    Object.assign(S.sync, { connected: false, institution: null, cursor: '', accounts: [] }); save(); render(); toast('Bank disconnected');
+  }
+});
 
 /* ---------- events ---------- */
 const find = (arr, el) => arr.find(x => x.id === el.closest('[data-id]')?.dataset.id);
@@ -524,7 +654,8 @@ const actions = {
   delRule: el => { S.rules = S.rules.filter(r => r.id !== el.closest('[data-id]').dataset.id); save(); render(); },
   preview: () => { buildPreview(); $('#impArea').innerHTML = importHTML(); },
   doImport, cancelImport: () => { ui.imp = null; $('#impArea').innerHTML = ''; $('#csvFile').value = ''; },
-  export: () => download(`budget-backup-${today()}.json`, JSON.stringify({ app: 'budget-app', exported: new Date().toISOString(), data: S }, null, 2), 'application/json'),
+  export: () => download(`budget-backup-${today()}.json`, JSON.stringify({ app: 'budget-app', exported: new Date().toISOString(), data: { ...S, sync: { ...S.sync, passcode: '' } } }, null, 2), 'application/json'),
+  ...actions_sync,
   reset: () => { if (confirm('Erase ALL budget data on this device? Export a backup first!') && confirm('Really erase everything?')) { S = defaults(); save(); ui.imp = null; render(); toast('Reset done'); } }
 };
 document.addEventListener('click', e => {
@@ -567,7 +698,7 @@ async function restore(file) {
     const j = JSON.parse(await file.text()); const d = j.data || j;
     if (!Array.isArray(d.categories) || !Array.isArray(d.transactions)) throw new Error('Not a budget backup');
     if (!confirm(`Replace current data with backup (${d.transactions.length} transactions${j.exported ? ', from ' + new Date(j.exported).toLocaleDateString() : ''})?`)) return;
-    const def = defaults(); S = { ...def, ...d, settings: { ...def.settings, ...(d.settings || {}) } }; save(); render(); toast('Backup restored');
+    const def = defaults(), pc = S.sync?.passcode || ''; S = { ...def, ...d, settings: { ...def.settings, ...(d.settings || {}) }, sync: { ...blankSync(), ...(d.sync || {}) } }; if (!S.sync.passcode) S.sync.passcode = pc; save(); render(); toast('Backup restored');
   } catch (err) { alert('Could not restore: ' + err.message); }
 }
 
@@ -577,4 +708,11 @@ const net = () => $('#offline').classList.toggle('hidden', navigator.onLine);
 addEventListener('online', net); addEventListener('offline', net); net();
 if ('serviceWorker' in navigator) addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(err => console.warn('SW', err)));
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
-window.__budget = { get state() { return S; }, parseCSV, parseDate, autoCat, computePlan, debtStatus };
+// Resume Plaid Link after an OAuth bank redirect, then auto-sync at most every 6 hours when connected.
+if (syncOn() && /[?&]oauth_state_id=/.test(location.search) && sessionStorage.getItem('plaidLinkToken')) {
+  const href = location.href; history.replaceState(null, '', location.pathname);
+  openLink(sessionStorage.getItem('plaidLinkToken'), href).catch(e => toast(e.message));
+} else if (syncOn() && S.sync.connected && navigator.onLine && (!S.sync.lastSync || Date.now() - Date.parse(S.sync.lastSync) > 6 * 3600e3)) {
+  setTimeout(() => syncNow(true), 1500);
+}
+window.__budget = { get state() { return S; }, parseCSV, parseDate, autoCat, computePlan, debtStatus, applySync };
