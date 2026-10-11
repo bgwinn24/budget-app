@@ -116,4 +116,4 @@ section.adv h3{margin:0 0 .4rem;font-size:1rem}
   background:radial-gradient(38% 28% at 22% 28%,var(--glow1),transparent 70%),radial-gradient(34% 26% at 78% 72%,var(--glow2),transparent 70%),repeating-linear-gradient(115deg,var(--lines) 0 1px,transparent 1px 30px)}
 @keyframes bgdrift{from{transform:translate3d(-6%,-4%,0) rotate(-2deg)}to{transform:translate3d(6%,4%,0) rotate(2deg)}}
 @media (prefers-reduced-motion:reduce){#bgfx{animation:none}}
-.topbar.center h1{text-align:center} .topbar.center #offline{position:absolute;right:1rem}
+.topbar h1{text-align:center} .topbar #offline{position:absolute;right:1rem}
