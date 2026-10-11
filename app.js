@@ -152,8 +152,8 @@ async function cloudPush() {
   try {
     const d = await cloudApi('PUT', { rev: cloud.rev, data: docOut() });
     if (d.code === 'REV_CONFLICT') serverWins(d);
-    else { cloud.rev = d.rev; cloud.dirty = Math.max(0, cloud.dirty - n); cloud.saved = new Date().toISOString(); saveCloud(); }
-  } catch (e) { console.warn('cloud push', e.message); }
+    else { cloud.rev = d.rev; cloud.dirty = Math.max(0, cloud.dirty - n); cloud.saved = new Date().toISOString(); delete cloud.err; saveCloud(); }
+  } catch (e) { console.warn('cloud push', e.message); cloud.err = e.message; saveCloud(); }
   finally { pushing = false; if (cloud.dirty && navigator.onLine) { clearTimeout(pushTimer); pushTimer = setTimeout(cloudPush, 2000); } }
 }
 async function cloudSync() {   // on open / foreground / back online: pull, then push our edits
@@ -474,6 +474,7 @@ function accountHTML() {
   const c = JSON.parse(localStorage.getItem(COPY) || 'null');
   return `<div class="card" id="account"><h3>Account</h3>
     <p class="small">Signed in${S.sync.label ? ' as <b>' + h(S.sync.label) + '</b>' : ''}. ${cloud.dirty ? 'Changes waiting to save to your account.' : 'Saved to your account.'}</p>
+    ${cloud.dirty && cloud.err ? `<p class="small bad">Last save error: ${h(cloud.err)}</p>` : ''}
     ${c ? `<p class="small">A copy of this device's data from ${h(new Date(c.at).toLocaleString())} was kept.</p>
       <div class="row"><button data-act="restoreCopy">Restore that copy</button><button data-act="dropCopy">Delete copy</button></div>` : ''}
     <div class="row" style="margin-top:.5rem"><button class="danger" data-act="signOut">Sign out</button></div></div>`;
