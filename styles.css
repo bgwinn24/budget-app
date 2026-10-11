@@ -101,3 +101,18 @@ section.adv h3{margin:0 0 .4rem;font-size:1rem}
 :root[data-theme=matrix] .huge{text-shadow:0 0 10px rgba(0,255,65,.45)}
 #rain{position:fixed;inset:0;width:100%;height:100%;z-index:0;pointer-events:none;opacity:.22}
 :root[data-theme=matrix] main{position:relative;z-index:1}
+:root[data-theme=charcoal]{--bg:#f4f4f5;--card:#fff;--text:#18181b;--muted:#5c5c66;--line:#dcdce0;--accent:#2b2d31;--accent-ink:#fff;--red:#dc2626;
+  --warn:#b45309;--bad:#b91c1c;--good:#15803d;--bar:#e4e4e7;--input:#fff;--goalbar:#2b2d31;--glow1:rgba(220,38,38,.10);--glow2:rgba(43,45,49,.10);--lines:rgba(0,0,0,.035);color-scheme:light}
+@media (prefers-color-scheme:dark){:root[data-theme=charcoal]{--bg:#111113;--card:#1c1c1f;--text:#ededee;--muted:#a1a1aa;--line:#303035;--accent:#f87171;--accent-ink:#18181b;--red:#ef4444;
+  --warn:#f59e0b;--bad:#fca5a5;--good:#4ade80;--bar:#2c2c31;--input:#141416;--goalbar:#d4d4d8;--shadow:none;--glow1:rgba(220,38,38,.26);--glow2:rgba(127,29,29,.28);--lines:rgba(255,255,255,.03);color-scheme:dark}
+  :root[data-theme=charcoal] .topbar{background:#232427;color:#f4f4f5}
+  :root[data-theme=charcoal] button.primary{background:#dc2626;border-color:#dc2626;color:#fff}}
+:root[data-theme=charcoal] .topbar{box-shadow:inset 0 -4px 0 var(--red)}
+:root[data-theme=charcoal] .hero{border-top:4px solid var(--red)}
+:root[data-theme=charcoal] .tabs button.active{box-shadow:inset 0 3px 0 var(--red)}
+:root[data-theme=charcoal] .goal .bar:not(.warn):not(.over)>i,:root[data-theme=charcoal] #homeGoals .bar:not(.warn):not(.over)>i{background:var(--goalbar)}
+:root[data-theme=charcoal] main{position:relative;z-index:1}
+#bgfx{position:fixed;inset:-25%;z-index:0;pointer-events:none;animation:bgdrift 14s ease-in-out infinite alternate;
+  background:radial-gradient(38% 28% at 22% 28%,var(--glow1),transparent 70%),radial-gradient(34% 26% at 78% 72%,var(--glow2),transparent 70%),repeating-linear-gradient(115deg,var(--lines) 0 1px,transparent 1px 30px)}
+@keyframes bgdrift{from{transform:translate3d(-6%,-4%,0) rotate(-2deg)}to{transform:translate3d(6%,4%,0) rotate(2deg)}}
+@media (prefers-reduced-motion:reduce){#bgfx{animation:none}}

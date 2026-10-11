@@ -380,6 +380,8 @@ function render() {
   document.documentElement.dataset.theme = S.settings.theme === 'auto' ? '' : S.settings.theme;
   if (S.settings.theme === 'auto') delete document.documentElement.dataset.theme;
   matrixRain(S.settings.theme === 'matrix');
+  if ((S.settings.theme === 'charcoal') !== !!$('#bgfx')) {   // Charcoal: slow drifting glow behind the cards (CSS only)
+    if ($('#bgfx')) $('#bgfx').remove(); else document.body.insertAdjacentHTML('afterbegin', '<div id="bgfx" aria-hidden="true"></div>'); }
   const views = { home: viewHome, plan: viewPlan, spend: viewSpend, debts: viewDebts, more: viewMore };
   $('#view').innerHTML = safe({ home: 'Home', plan: 'Paycheck', spend: 'Spending', debts: 'Debts', more: 'More' }[tab], views[tab]);
   $('#title').textContent = { home: 'Budget', plan: 'Paycheck plan', spend: 'Spending', debts: 'Debts', more: 'More' }[tab];
@@ -645,7 +647,7 @@ function moreCoreHTML() {
     <button data-act="addCat" style="margin-top:.6rem">+ Add category</button></details></div>
   <div class="card"><h2>Settings</h2>
     <div class="grid2"><div><label for="sWeek">Week starts on</label><select id="sWeek" data-set="weekStart">${opts(['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].map((d, i) => [i, d]), S.settings.weekStart)}</select></div>
-      <div><label for="sTheme">Theme</label><select id="sTheme" data-set="theme">${opts([['auto', 'Match phone'], ['light', 'Light'], ['dark', 'Dark'], ['matrix', 'Matrix']], S.settings.theme)}</select></div></div>
+      <div><label for="sTheme">Theme</label><select id="sTheme" data-set="theme">${opts([['auto', 'Match phone'], ['light', 'Light'], ['dark', 'Dark'], ['charcoal', 'Charcoal'], ['matrix', 'Matrix']], S.settings.theme)}</select></div></div>
     <div class="grid2"><div><label for="sCdName">Countdown event name (optional)</label><input id="sCdName" data-set="countdownName" placeholder="e.g. Vacation" value="${h(S.settings.countdownName || '')}"></div>
       <div><label for="sCdDate">Countdown date (optional)</label><input id="sCdDate" type="date" data-set="countdownDate" value="${h(S.settings.countdownDate || '')}"></div></div>
     <p class="small muted">v2.1 · ${S.transactions.length} transactions stored on this device.</p></div>`;
