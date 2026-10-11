@@ -461,6 +461,7 @@ function gateHTML() {
     <form id="pwForm" style="text-align:left">
       <label for="pwEmail">Email</label><input id="pwEmail" type="email" autocomplete="email" inputmode="email" required>
       <label for="pwPass">Password${c ? ' (at least 8 characters)' : ''}</label><input id="pwPass" type="password" minlength="8" autocomplete="${c ? 'new-password' : 'current-password'}" required>
+      ${c ? `<label for="pwInvite">Invite code</label><input id="pwInvite" placeholder="BUDGET-XXXX-XXXX" value="${h(ui.invite || '')}" autocapitalize="characters" autocomplete="off" spellcheck="false" required>` : ''}
       <button class="primary" type="submit" style="width:100%;margin-top:.8rem">${c ? 'Create account' : 'Sign in'}</button></form>
     <p class="small"><a href="#" data-act="pwToggle">${c ? 'Already have an account? Sign in' : 'New here? Create an account'}</a></p>
     <p class="small muted" style="margin:.8rem 0 .3rem">or</p>
@@ -927,15 +928,22 @@ async function onGoogleCredential(resp) { await backendLogin('google-login', { c
 document.addEventListener('submit', e => { if (e.target.id !== 'pwForm') return; e.preventDefault();
   const email = $('#pwEmail').value.trim(), password = $('#pwPass').value;
   if (ui.pwMode !== 'signin' && password.length < 8) return toast('Use at least 8 characters for your password.');
-  backendLogin(ui.pwMode === 'signin' ? 'login' : 'register', { email, password });
+  if (ui.pwMode === 'signin') return backendLogin('login', { email, password });
+  const invite = $('#pwInvite').value.trim(); if (!invite) return toast('Invite code required');
+  backendLogin('register', { email, password, invite });
 });
 async function inviteLogin(code) { await backendLogin('invite-login', { code }); }
 async function backendLogin(path, payload) {
   try {
     const r = await fetch(SYNC_URL_DEFAULT + '/' + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
       .catch(() => { throw new Error('Could not reach the sync server. Are you online?'); });
-    const d = await r.json().catch(() => ({})); if (!r.ok) throw new Error(d.error || 'Sign-in failed');
-    // Different login = different bank connection on the server: start this phone's link state fresh.
+    const d = await r.json().catch(() => ({}));
+    if (d.code === 'INVITE_REQUIRED' && path === 'google-login') {   // new Google user: ask for the invite code, then retry
+      const code = prompt(`${d.error}\n\nEnter your invite code to create your account:`, '');
+      return code ? backendLogin(path, { ...payload, invite: code.trim() }) : undefined;
+    }
+    if (d.code === 'USE_FOR_SIGNUP') { ui.pwMode = 'create'; ui.invite = payload.code; render(); return toast(d.error); }
+    if (!r.ok) throw new Error(d.error || 'Sign-in failed');
     await afterLogin(d); toast('Signed in');
   } catch (e) { toast(e.message); }
 }
