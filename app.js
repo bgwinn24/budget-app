@@ -384,7 +384,8 @@ function render() {
     if ($('#bgfx')) $('#bgfx').remove(); else document.body.insertAdjacentHTML('afterbegin', '<div id="bgfx" aria-hidden="true"></div>'); }
   const views = { home: viewHome, plan: viewPlan, spend: viewSpend, debts: viewDebts, more: viewMore };
   $('#view').innerHTML = safe({ home: 'Home', plan: 'Paycheck', spend: 'Spending', debts: 'Debts', more: 'More' }[tab], views[tab]);
-  $('#title').textContent = { home: 'Budget', plan: 'Paycheck plan', spend: 'Spending', debts: 'Debts', more: 'More' }[tab];
+  $('#title').textContent = { home: 'Dolla Overview', plan: 'Paycheck plan', spend: 'Spending', debts: 'Debts', more: 'More' }[tab];
+  $('.topbar').classList.toggle('center', tab === 'home');
 }
 
 function viewHome() {
