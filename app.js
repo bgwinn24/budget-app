@@ -85,7 +85,7 @@ function defaults() {
     sync: blankSync()
   };
 }
-const blankSync = () => ({ url: '', passcode: '', session: '', email: '', key: '', cursor: '', connected: false, institution: null, lastSync: null, accounts: [] });
+const blankSync = () => ({ url: '', passcode: '', session: '', label: '', key: '', cursor: '', connected: false, institution: null, lastSync: null, accounts: [] });
 function load() {
   try {
     const raw = localStorage.getItem(KEY);
@@ -384,7 +384,6 @@ function render() {
     if ($('#bgfx')) $('#bgfx').remove(); else document.body.insertAdjacentHTML('afterbegin', '<div id="bgfx" aria-hidden="true"></div>'); }
   const views = { home: viewHome, plan: viewPlan, spend: viewSpend, debts: viewDebts, more: viewMore };
   $('#view').innerHTML = safe({ home: 'Home', plan: 'Paycheck', spend: 'Spending', debts: 'Debts', more: 'More' }[tab], views[tab]);
-  if (tab === 'more') mountGoogle();
   $('#title').textContent = { home: 'Dolla Overview', plan: 'Paycheck plan', spend: 'Spending', debts: 'Debts', more: 'More' }[tab];
 }
 
@@ -805,21 +804,21 @@ const actions_sync = {};
 /* ---------- bank sync (optional; only active when a Worker URL is set) ---------- */
 const PLAID_JS = 'https://cdn.plaid.com/link/v2/stable/link-initialize.js';
 const dayDiff = (a, b) => Math.round((parseISO(a) - parseISO(b)) / 864e5);
-// Google sign-in: friends just sign in, no server URL or passcode. The old passcode setup still works under "Advanced".
+// Invite codes: friends just enter their code, no server URL or passcode. The old passcode setup still works under "Advanced".
 const SYNC_URL_DEFAULT = 'https://budget-plaid-worker.bgwinn24.workers.dev';
-const GOOGLE_CLIENT_ID = 'REPLACE_WITH_GOOGLE_CLIENT_ID';   // public OAuth Web client ID
-const GSI_JS = 'https://accounts.google.com/gsi/client';
 const syncOn = () => !!(S.sync.url || S.sync.session);
 const syncUrl = () => (S.sync.session ? '' : S.sync.url) || SYNC_URL_DEFAULT;
 function syncCardHTML() {
   const y = S.sync, on = syncOn(), g = !!y.session;
   return `<section class="adv" id="syncCard"><h3>Bank sync <span class="tag">optional</span></h3>
     <p class="small muted">Your bank login goes only to Plaid; this phone never stores bank credentials or access tokens.</p>
-    ${g ? `<p class="small">Signed in as ${h(y.email)} <button data-act="syncSignOut">Sign out</button></p>` : '<div id="gsiBtn"></div>'}
+    ${g ? `<p class="small">Invite active${y.label ? ' for ' + h(y.label) : ''} <button data-act="syncSignOut">Sign out</button></p>`
+      : `<label for="syInvite">Enter invite code</label><input id="syInvite" placeholder="BUDGET-XXXX-XXXX" autocapitalize="characters" autocomplete="off" spellcheck="false">
+      <div class="row" style="margin-top:.6rem"><button class="primary" data-act="syncInvite">Continue</button></div>`}
     ${on ? `<p><b>${y.connected ? `Connected${y.institution ? ' to ' + h(y.institution) : ''}` : 'Not connected'}</b></p><p class="small">${y.lastSync ? 'Last sync: ' + new Date(y.lastSync).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : 'Never synced'}
       ${y.accounts?.length ? '<br>Accounts: ' + y.accounts.map(a => h(`${a.name || 'Account'}${a.mask ? ' ••' + a.mask : ''}`)).join(', ') : ''}</p>
       <div class="row">${y.connected ? `<button class="primary" data-act="syncNow">Sync now</button>${y.needsCardConsent ? '<button data-act="syncConsent">Allow card details</button>' : ''}${y.loginRequired ? '<button data-act="syncRelogin">Fix bank login</button>' : ''}<button class="danger" data-act="syncDisconnect">Disconnect</button>`
-        : `<button class="primary" data-act="syncConnect">Connect bank</button>`}</div>
+        : `<button class="primary" data-act="syncConnect">Connect your bank</button>`}</div>
       <p class="small muted" id="syncMsg"></p>` : ''}
     ${g ? '' : `<details ${y.url ? 'open' : ''}><summary>Advanced: own sync server + passcode</summary>
     <label for="syUrl">Sync server URL</label><input id="syUrl" type="url" inputmode="url" placeholder="https://….workers.dev" value="${h(y.url)}" autocomplete="off">
@@ -827,27 +826,15 @@ function syncCardHTML() {
     <div class="row" style="margin-top:.6rem"><button data-act="syncSave">Save</button></div></details>`}
     </section>`;
 }
-function loadScript(src) {
-  return new Promise((ok, bad) => { const sc = document.createElement('script'); sc.src = src; sc.onload = ok; sc.onerror = () => bad(new Error('Could not load ' + src)); document.head.appendChild(sc); });
-}
-async function mountGoogle() {
-  const el = $('#gsiBtn'); if (!el) return;
-  if (GOOGLE_CLIENT_ID.startsWith('REPLACE')) { el.innerHTML = '<p class="small muted">Google sign-in is not set up yet.</p>'; return; }
+async function inviteLogin(code) {
   try {
-    if (!window.google?.accounts?.id) await loadScript(GSI_JS);
-    google.accounts.id.initialize({ client_id: GOOGLE_CLIENT_ID, callback: onGoogleCredential });
-    if (el.isConnected) google.accounts.id.renderButton(el, { theme: 'outline', size: 'large', text: 'signin_with' });
-  } catch { el.innerHTML = '<p class="small muted">Could not load Google sign-in. Are you online?</p>'; }
-}
-async function onGoogleCredential(resp) {
-  try {
-    const r = await fetch(SYNC_URL_DEFAULT + '/google-login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ credential: resp.credential }) })
+    const r = await fetch(SYNC_URL_DEFAULT + '/invite-login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }) })
       .catch(() => { throw new Error('Could not reach the sync server. Are you online?'); });
-    const d = await r.json().catch(() => ({})); if (!r.ok) throw new Error(d.error || 'Sign-in failed');
-    // Different account = different bank connection on the server: start this phone's link state fresh.
-    Object.assign(S.sync, { session: d.session, email: d.email, connected: false, institution: null, cursor: '', accounts: [] }); save(); render();
+    const d = await r.json().catch(() => ({})); if (!r.ok) throw new Error(d.error || 'That invite code did not work');
+    // Different login = different bank connection on the server: start this phone's link state fresh.
+    Object.assign(S.sync, { session: d.session, label: d.label || '', connected: false, institution: null, cursor: '', accounts: [] }); save(); render();
     const st = await syncApi('status'); Object.assign(S.sync, { connected: st.connected, institution: st.institution }); save(); render();
-    toast(st.connected ? 'Signed in · bank connected' : 'Signed in. Now tap "Connect bank".');
+    toast(st.connected ? 'Welcome back · bank connected' : 'Invite accepted. Now tap "Connect your bank".');
   } catch (e) { toast(e.message); }
 }
 async function syncApi(path, body = {}) {
@@ -990,8 +977,9 @@ Object.assign(actions_sync, {
     catch (e) { toast(e.message); syncMsg(e.message); }
   },
   syncNow: () => syncNow(false),
-  syncSignOut: () => { window.google?.accounts?.id?.disableAutoSelect();
-    Object.assign(S.sync, { session: '', email: '', connected: false, institution: null, cursor: '', accounts: [] }); save(); render(); },
+  syncInvite: () => { const c = $('#syInvite').value.trim(); if (!c) return toast('Enter your invite code.'); inviteLogin(c); },
+  syncSignOut: () => { if (!confirm('Sign out of bank sync on this phone? Your bank stays connected; re-enter your invite code to come back.')) return;
+    Object.assign(S.sync, { session: '', label: '', connected: false, institution: null, cursor: '', accounts: [] }); save(); render(); },
   syncConsent: () => openUpdate(true),
   syncRelogin: () => openUpdate(false),
   syncDisconnect: async () => {
@@ -1156,7 +1144,7 @@ async function restore(file) {
     const j = JSON.parse(await file.text()); const d = j.data || j;
     if (!Array.isArray(d.categories) || !Array.isArray(d.transactions)) throw new Error('Not a budget backup');
     if (!confirm(`Replace current data with backup (${d.transactions.length} transactions${j.exported ? ', from ' + new Date(j.exported).toLocaleDateString() : ''})?`)) return;
-    const def = defaults(), pc = S.sync?.passcode || '', ses = { session: S.sync?.session || '', email: S.sync?.email || '' }; S = { ...def, ...d, settings: { ...def.settings, ...(d.settings || {}) }, sync: { ...blankSync(), ...(d.sync || {}) } }; if (!S.sync.passcode) S.sync.passcode = pc; if (!S.sync.session) Object.assign(S.sync, ses); migrate(); save(); render(); toast('Backup restored');
+    const def = defaults(), pc = S.sync?.passcode || '', ses = { session: S.sync?.session || '', label: S.sync?.label || '' }; S = { ...def, ...d, settings: { ...def.settings, ...(d.settings || {}) }, sync: { ...blankSync(), ...(d.sync || {}) } }; if (!S.sync.passcode) S.sync.passcode = pc; if (!S.sync.session) Object.assign(S.sync, ses); migrate(); save(); render(); toast('Backup restored');
   } catch (err) { alert('Could not restore: ' + err.message); }
 }
 
