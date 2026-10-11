@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Budget</title>
+<meta name="description" content="Personal weekly budget. Data stays on this device.">
+<meta name="theme-color" content="#0f766e">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="topbar">
+  <h1 id="title">Budget</h1>
+  <span id="offline" class="pill hidden">Offline</span>
+</header>
+<main id="view" aria-live="polite"></main>
+<div id="toast" role="status" class="toast hidden"></div>
+<nav class="tabs" aria-label="Sections">
+  <button data-tab="home" class="active"><span>🏠</span>Home</button>
+  <button data-tab="plan"><span>💵</span>Paycheck</button>
+  <button data-tab="spend"><span>🧾</span>Spending</button>
+  <button data-tab="debts"><span>📉</span>Debts</button>
+  <button data-tab="more"><span>⚙️</span>More</button>
+</nav>
+<noscript>This app needs JavaScript.</noscript>
+<script src="app.js"></script>
+</body>
+</html>
