@@ -79,3 +79,9 @@ details summary{cursor:pointer;font-weight:600;padding:.4rem 0;min-height:36px}
 .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(5rem + env(safe-area-inset-bottom));
   background:var(--text);color:var(--bg);padding:.6rem 1rem;border-radius:10px;z-index:10;max-width:90vw}
 .fab{position:fixed;right:1rem;bottom:calc(4.8rem + env(safe-area-inset-bottom));border-radius:999px;width:56px;height:56px;font-size:1.6rem;padding:0}
+.huge{font-size:2.8rem;font-weight:800;line-height:1.1;letter-spacing:-.02em;font-variant-numeric:tabular-nums;margin:.15rem 0}
+.hero{padding:1.2rem 1rem}
+.card.compact{padding:.7rem 1rem;margin-bottom:.7rem}
+.card.compact h2{font-size:.95rem;margin-bottom:.3rem}
+section.adv{border-top:1px solid var(--line);padding:.8rem 0 .4rem}
+section.adv h3{margin:0 0 .4rem;font-size:1rem}

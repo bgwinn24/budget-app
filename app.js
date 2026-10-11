@@ -54,7 +54,7 @@ function defaults() {
   const cat = (name, period, extra = {}) => ({ id: uid(), name, budget: null, period, ...extra });
   const cats = [cat('Hotels/Lodging', 'week'), cat('Gas', 'week'), cat('Food', 'week'), cat('Bills', 'month'),
     cat('Payment plans', 'month'), cat('Savings', 'month'), cat('Fun/Gaming', 'week'),
-    cat('Other', 'week'), cat('Income', 'week', { income: true })];
+    cat('Other', 'week'), cat('Transfers', 'week'), cat('Income', 'week', { income: true })];
   const id = n => cats.find(c => c.name === n).id;
   const kw = {
     'Hotels/Lodging': ['hotel', 'motel', ' inn', 'marriott', 'hilton', 'hampton', 'holiday inn', 'courtyard', 'suites', 'airbnb', 'extended stay', 'red roof', 'best western'],
@@ -69,7 +69,7 @@ function defaults() {
   const alloc = (name, type, catName) => ({ id: uid(), name, type, value: null, categoryId: catName ? id(catName) : '' });
   return {
     version: 1,
-    settings: { weekStart: 1, theme: 'auto', includeDebts: true, countdownDate: '', countdownName: '' },
+    settings: { weekStart: 1, theme: 'auto', includeDebts: true, countdownDate: '', countdownName: '', paycheckKeyword: '' },
     categories: cats,
     allocations: [alloc('Hotels/Lodging', 'fixed', 'Hotels/Lodging'), alloc('Gas', 'fixed', 'Gas'),
       alloc('Food', 'fixed', 'Food'),
@@ -91,7 +91,14 @@ function load() {
   } catch (e) { console.error(e); }
   return defaults();
 }
-let S = load();
+function migrate() {   // upgrade older saved data / backups in place
+  if (!S.settings.migrated21) {   // v2.1: one-time add of a Transfers category (excluded from safe-to-spend)
+    if (!S.categories.some(c => /transfer/i.test(c.name))) S.categories.splice(Math.max(0, S.categories.findIndex(c => c.income)), 0, { id: uid(), name: 'Transfers', budget: null, period: 'week' });
+    S.settings.migrated21 = true;
+  }
+  if (typeof S.settings.paycheckKeyword !== 'string') S.settings.paycheckKeyword = '';
+}
+let S = load(); migrate();
 function save() {
   try { localStorage.setItem(KEY, JSON.stringify(S)); }
   catch (e) { alert('Could not save — device storage may be full. Export a backup now.'); }
@@ -103,16 +110,21 @@ const catOpts = (sel, withBlank) => (withBlank ? `<option value="">${h(withBlank
 /* ---------- calculations ---------- */
 function debtStatus(d) {
   const paid = sum(d.payments, p => p.amount);
-  const remaining = d.balance == null ? null : Math.max(0, r2(d.balance - paid));
-  let projected = null, periods = null;
+  // Bank-synced balances are already current: only payments logged after the last sync reduce them.
+  const sincePaid = d.bank ? sum(d.payments.filter(p => p.date > (d.balanceAsOf || '')), p => p.amount) : paid;
+  const remaining = d.balance == null ? null : Math.max(0, r2(d.balance - sincePaid));
+  let projected = null, periods = null, neverPaysOff = false;
   if (remaining === 0) projected = d.payments.length ? d.payments.map(p => p.date).sort().at(-1) : today();
   else if (remaining && d.payment > 0) {
-    periods = Math.ceil(remaining / d.payment - 1e-9);
+    const perYear = { weekly: 52, biweekly: 26, semimonthly: 24, monthly: 12, quarterly: 4, yearly: 1 }[d.frequency] || 12;
+    const r = d.apr > 0 ? d.apr / 100 / perYear : 0;
+    if (r && d.payment <= remaining * r) { neverPaysOff = true; return { paid, remaining, projected: null, periods: null, behind: false, neverPaysOff }; }
+    periods = r ? Math.ceil(-Math.log(1 - r * remaining / d.payment) / Math.log(1 + r) - 1e-9) : Math.ceil(remaining / d.payment - 1e-9);
     const last = d.payments.map(p => p.date).sort().at(-1);
     projected = addPeriods(last || today(), last ? periods : periods - 1, d.frequency);
   }
   const behind = projected && d.endDate && remaining > 0 && projected > d.endDate;
-  return { paid, remaining, projected, periods, behind };
+  return { paid, remaining, projected, periods, behind, neverPaysOff };
 }
 function debtActive(d) { const st = debtStatus(d); return d.payment > 0 && (st.remaining == null || st.remaining > 0); }
 function computePlan(pay) {
@@ -152,6 +164,39 @@ function budgetHTML(rows) {
     ${over ? `<div class="small bad">⚠ Over by ${money(s - c.budget)}</div>` : ''}</div>`).join('');
 }
 
+const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+// Categories whose money is already covered by set-asides/savings or isn't spending at all.
+const nonSpending = c => !!c && (c.income || /bill|payment plan|debt|loan|transfer|saving|mortgage/i.test(c.name));
+const isSavingsAlloc = a => /saving/i.test(a.name) || /saving/i.test(catName(a.categoryId) || '');
+function safeToSpend(ref = today()) {
+  const [ws, we] = periodRange('week', ref);
+  const inWeek = S.paychecks.filter(p => p.date >= ws && p.date <= we);
+  let pc = inWeek.find(p => !p.auto) || inWeek[0], basis = 'this week';
+  if (!pc) { pc = [...S.paychecks].sort((a, b) => b.date.localeCompare(a.date))[0]; basis = 'planned'; }
+  if (!pc) return null;
+  const plan = computePlan(pc.amount);
+  const savings = r2(sum(plan.allocLines.filter(isSavingsAlloc), a => a.amt));
+  const spentTx = S.transactions.filter(t => t.type !== 'income' && t.source !== 'debt' && t.date >= ws && t.date <= we && !nonSpending(catById(t.categoryId)));
+  const spent = r2(sum(spentTx, t => t.amount));
+  return { ws, we, pay: pc.amount, basis, auto: !!pc.auto, setAside: plan.billTotal, savings, spent, safe: r2(pc.amount - plan.billTotal - savings - spent) };
+}
+/* Create this week's paycheck from an incoming deposit that matches the Paycheck keyword (never duplicates a week). */
+function autoPaychecks(txns) {
+  // keep existing auto paychecks in step with their deposit (pending → posted amount, or removed)
+  S.paychecks = S.paychecks.filter(p => { if (!p.auto || !p.txnId) return true; const t = S.transactions.find(x => x.id === p.txnId);
+    if (!t) return false; p.amount = t.amount; p.date = t.date; return true; });
+  const kw = (S.settings.paycheckKeyword || '').trim().toLowerCase(); if (!kw) return [];
+  const made = [];
+  for (const t of txns) {
+    if (!t || t.type !== 'income' || !`${t.importDesc || ''} ${t.note || ''}`.toLowerCase().includes(kw)) continue;
+    const ws = weekStartOf(t.date, S.settings.weekStart), we = addDays(ws, 6);
+    if (S.paychecks.some(p => p.date >= ws && p.date <= we)) continue;
+    const p = { id: uid(), date: t.date, amount: t.amount, auto: true, txnId: t.id }; S.paychecks.push(p); made.push(p);
+  }
+  return made;
+}
+const payToast = made => made.length ? ` · Paycheck added: ${made.map(p => money(p.amount)).join(', ')}` : '';
+
 /* ---------- views ---------- */
 let tab = 'home';
 const ui = { editTxn: null, txnMonth: today().slice(0, 7), txnCat: '', planPay: null, planDate: null, imp: null, logDebt: null };
@@ -167,29 +212,34 @@ function render() {
 function viewHome() {
   const wd = S.settings.countdownDate, wn = S.settings.countdownName || 'Countdown';
   const days = wd ? Math.round((parseISO(wd) - parseISO(today())) / 864e5) : null;
-  const pc = [...S.paychecks].sort((a, b) => b.date.localeCompare(a.date))[0];
-  const plan = pc ? computePlan(pc.amount) : null;
+  const st = safeToSpend();
   const rows = budgetRows(); const overs = rows.filter(r => r.over);
   const [ws, we] = periodRange('week');
-  const weekSpent = sum(S.transactions.filter(t => t.type !== 'income' && t.date >= ws && t.date <= we), t => t.amount);
   const debtLeft = sum(S.debts, d => debtStatus(d).remaining);
+  const y = S.sync;
   return `
-  ${days != null && days >= 0 ? `<div class="card"><div class="row"><div><div class="muted small">${h(wn)} · ${fmtDate(wd)}</div>
-    <div class="big">${days === 0 ? 'Today! 🎉' : `${days} day${days === 1 ? '' : 's'} to go`}</div></div></div></div>` : ''}
+  <div class="card hero" id="safeCard">
+    <div class="muted small">Safe to spend this week</div>
+    ${st ? `<div class="huge ${st.safe < 0 ? 'bad' : 'good'}" id="safeNum">${money(st.safe)}</div>
+      <div class="small muted">resets ${DAYS[S.settings.weekStart]} · ${fmtShort(ws)} – ${fmtShort(we)}</div>
+      <details class="small" style="border:0;margin-top:.3rem"><summary style="font-weight:400;min-height:0">How this is figured</summary>
+        <table><tbody>
+        <tr><td>Paycheck <span class="tag">${st.basis === 'planned' ? 'planned' : st.auto ? 'deposit' : 'this week'}</span></td><td class="num">${money(st.pay)}</td></tr>
+        <tr><td>Bills &amp; debt set-asides</td><td class="num">−${money(st.setAside)}</td></tr>
+        <tr><td>Savings</td><td class="num">−${money(st.savings)}</td></tr>
+        <tr><td>Spent so far</td><td class="num">−${money(st.spent)}</td></tr></tbody></table></details>`
+      : `<div class="huge muted" id="safeNum">—</div><p class="small muted">Enter your paycheck on the <b>Paycheck</b> tab to see this.</p>`}
+    <div class="row" style="margin-top:.6rem"><button class="primary" data-act="goto" data-tab="spend">+ Add spending</button>
+      ${y.url && y.connected ? `<button data-act="syncNow" id="homeSync">⟳ Sync now</button>` : ''}</div>
+    ${y.url && y.connected && y.lastSync ? `<div class="small muted" style="margin-top:.3rem">Bank synced ${new Date(y.lastSync).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</div>` : ''}
+  </div>
+  ${y.loginRequired ? consentCardHTML() : ''}
   ${overs.map(o => `<div class="alert">⚠ <b>${h(o.c.name)}</b> is over budget by ${money(o.s - o.c.budget)} ${o.c.period === 'month' ? 'this month' : 'this week'}.</div>`).join('')}
-  <div class="card"><h2>This week <span class="muted small">(${fmtShort(ws)} – ${fmtShort(we)})</span></h2>
-    <div class="grid2"><div><div class="muted small">Spent</div><div class="big">${money(weekSpent)}</div></div>
-    <div><div class="muted small">Last paycheck</div><div class="big">${pc ? money(pc.amount) : '—'}</div>
-    ${pc ? `<div class="small muted">${fmtDate(pc.date)}</div>` : ''}</div></div>
-    ${plan ? `<p>Left to spend after plan: <b class="${plan.left < 0 ? 'bad' : 'good'}">${money(plan.left)}</b></p>`
-      : `<p class="muted small">Enter your paycheck on the <b>Paycheck</b> tab to see your weekly plan.</p>`}
-    <button class="primary" data-act="goto" data-tab="spend">+ Add a transaction</button></div>
-  <div class="card"><h2>Budgets</h2>${budgetHTML(rows)}</div>
-  <div class="card"><h2>Debts</h2>
-    ${S.debts.length ? `<ul class="list">${S.debts.map(d => { const st = debtStatus(d); return `<li><div class="grow"><div class="t">${h(d.name)}</div>
-      <div class="small muted">${st.projected ? 'Payoff ~' + fmtDate(st.projected) : 'Enter balance & payment'}${st.behind ? ' <span class="tag bad">past end date</span>' : ''}</div></div>
-      <span class="amt">${money(st.remaining)}</span></li>`; }).join('')}</ul>
-      <p class="small muted">Total remaining: <b>${money(debtLeft)}</b></p>` : '<p class="muted small">No debts listed.</p>'}</div>`;
+  ${days != null && days >= 0 ? `<div class="card compact"><b>${h(wn)}</b> · ${fmtDate(wd)} — ${days === 0 ? 'today! 🎉' : `${days} day${days === 1 ? '' : 's'} to go`}</div>` : ''}
+  ${rows.length ? `<div class="card compact"><h2>Budgets</h2>${budgetHTML(rows)}</div>` : ''}
+  ${S.debts.length ? `<div class="card compact"><h2>Debts <span class="muted small">· ${money(debtLeft)} left</span></h2><ul class="list">${S.debts.map(d => { const ds = debtStatus(d); return `<li><div class="grow"><div class="t">${h(d.name)}${d.bank ? ' <span class="tag">bank</span>' : ''}</div>
+      <div class="small muted">${d.bank && d.dueDate ? `Due ${fmtShort(d.dueDate)}${d.payment ? ' · min ' + money(d.payment) : ''}` : ds.projected ? 'Payoff ~' + fmtDate(ds.projected) : 'Enter balance & payment'}${ds.behind ? ' <span class="tag bad">past end date</span>' : ''}</div></div>
+      <span class="amt">${money(ds.remaining)}</span></li>`; }).join('')}</ul></div>` : ''}`;
 }
 
 function viewPlan() {
@@ -202,6 +252,9 @@ function viewPlan() {
       <input id="payAmt" inputmode="decimal" placeholder="0.00" value="${pay ?? ''}" data-live="plan"></div>
       <div><label for="payDate">Pay date</label><input id="payDate" type="date" value="${h(date)}"></div></div>
     <div class="row" style="margin-top:.6rem"><button class="primary" data-act="savePay">Save paycheck</button></div>
+    <label for="sPayKw">Paycheck keyword (optional)</label>
+    <input id="sPayKw" data-set="paycheckKeyword" placeholder="e.g. payroll" value="${h(S.settings.paycheckKeyword || '')}" autocomplete="off">
+    <p class="small muted">When an imported or bank-synced deposit's description contains this, that week's paycheck is filled in automatically (unless you already entered one).</p>
   </div>
   <div class="card" id="planOut">${planHTML(pay)}</div>
   <div class="card"><h2>Allocations</h2>
@@ -227,7 +280,7 @@ function viewPlan() {
       <span>Also set aside debt payments (from the Debts tab)</span></label></div>
   <div class="card"><h2>Paycheck history</h2>
     ${S.paychecks.length ? `<ul class="list">${[...S.paychecks].sort((a, b) => b.date.localeCompare(a.date)).map(p => `<li data-id="${p.id}">
-      <div class="grow">${fmtDate(p.date)}</div><span class="amt">${money(p.amount)}</span>
+      <div class="grow">${fmtDate(p.date)}${p.auto ? ' <span class="tag">auto</span>' : ''}</div><span class="amt">${money(p.amount)}</span>
       <button class="mini" data-act="loadPay">View</button><button class="mini danger" data-act="delPay">✕</button></li>`).join('')}</ul>` : '<p class="muted small">None saved yet.</p>'}</div>`;
 }
 function planHTML(pay) {
@@ -275,26 +328,41 @@ function viewSpend() {
       <button class="mini" data-act="editTxn" aria-label="Edit">✎</button><button class="mini danger" data-act="delTxn" aria-label="Delete">✕</button></li>`).join('') || '<li class="muted small">Nothing here yet.</li>'}</ul></div>`;
 }
 
+function consentCardHTML() {
+  const y = S.sync;
+  if (!(y.url && y.connected)) return '';
+  if (y.loginRequired) return `<div class="card alert warn"><b>Your bank needs you to log in again.</b><br><span class="small">This reuses your existing connection.</span>
+    <div class="row" style="margin-top:.5rem"><button class="primary" data-act="syncRelogin">Fix bank login</button></div></div>`;
+  if (y.needsCardConsent) return `<div class="card" id="consentCard"><b>Show your credit card automatically?</b>
+    <p class="small muted">Lets the app read your card's balance, minimum payment, due date and APR from ${h(y.institution || 'your bank')}. Uses your existing bank connection; no new connection is added.</p>
+    <button class="primary" data-act="syncConsent">Allow card details</button></div>`;
+  return '';
+}
 function viewDebts() {
-  return S.debts.map(d => {
-    const st = debtStatus(d);
-    const pct = d.balance > 0 ? Math.min(100, st.paid / d.balance * 100) : 0;
+  return consentCardHTML() + S.debts.map(d => {
+    const st = debtStatus(d), b = d.bank;
+    const pct = b ? (d.limit > 0 ? Math.min(100, (d.balance || 0) / d.limit * 100) : 0) : d.balance > 0 ? Math.min(100, st.paid / d.balance * 100) : 0;
     return `<div class="card" data-id="${d.id}">
-      <div class="row"><h2 style="margin:0">${h(d.name)}</h2><div class="amt" style="text-align:right">${money(st.remaining)}<div class="small muted">remaining</div></div></div>
-      <div class="bar"><i style="width:${pct.toFixed(1)}%"></i></div>
-      <p class="small">${st.remaining === 0 ? '<b class="good">Paid off! 🎉</b>' : st.projected ? `Projected payoff: <b>${fmtDate(st.projected)}</b> (${st.periods} more payment${st.periods === 1 ? '' : 's'})` : '<span class="muted">Enter balance and payment amount to project payoff.</span>'}
+      <div class="row"><h2 style="margin:0">${h(d.name)}${b ? ' <span class="tag">from bank</span>' : ''}</h2><div class="amt" style="text-align:right">${money(st.remaining)}<div class="small muted">${b ? 'balance' : 'remaining'}</div></div></div>
+      <div class="bar ${b && pct > 80 ? 'warn' : ''}"><i style="width:${pct.toFixed(1)}%"></i></div>
+      ${b ? `<p class="small muted" style="margin:.3rem 0 0">${[d.limit ? `Limit ${money(d.limit)} · ${pct.toFixed(0)}% used` : '', d.apr != null ? `APR ${d.apr}%` : '',
+        d.payment ? `Min ${money(d.payment)}` : '', d.dueDate ? `<b>Due ${fmtDate(d.dueDate)}</b>` : '', d.balanceAsOf ? `updated ${fmtShort(d.balanceAsOf)}` : ''].filter(Boolean).join(' · ')}</p>` : ''}
+      <p class="small">${st.remaining === 0 ? '<b class="good">Paid off! 🎉</b>' : st.neverPaysOff ? '<span class="bad">At this payment the interest outgrows it; it never pays off.</span>' : st.projected ? `Projected payoff: <b>${fmtDate(st.projected)}</b> (${st.periods} more payment${st.periods === 1 ? '' : 's'}${d.apr > 0 ? ', incl. interest' : ''})` : `<span class="muted">${b ? 'Minimum payment not available yet.' : 'Enter balance and payment amount to project payoff.'}</span>`}
       ${d.endDate ? `<br>Plan end date: ${fmtDate(d.endDate)} ${st.behind ? '<span class="tag bad">projection runs past end date</span>' : ''}` : ''}</p>
       <div class="row"><button class="primary" data-act="logPay">Log payment</button></div>
       ${ui.logDebt === d.id ? `<div style="margin-top:.6rem"><div class="grid2"><div><label>Amount</label><input id="dpAmt" inputmode="decimal" value="${d.payment ?? ''}"></div>
         <div><label>Date</label><input id="dpDate" type="date" value="${today()}"></div></div>
-        <label class="row" style="color:var(--text)"><input type="checkbox" id="dpTxn" checked style="flex:0"><span>Also record as spending in <b>${h(catName(d.categoryId))}</b></span></label>
+        <label class="row" style="color:var(--text)"><input type="checkbox" id="dpTxn" ${b ? '' : 'checked'} style="flex:0"><span>Also record as spending in <b>${h(catName(d.categoryId))}</b></span></label>
         <div class="row"><button class="primary" data-act="savePayment">Save payment</button><button data-act="cancelLog">Cancel</button></div></div>` : ''}
       <details><summary>Edit details</summary><div class="editor-row" data-id="${d.id}">
         <div class="full"><label>Name</label><input data-edit="debt" data-f="name" value="${h(d.name)}"></div>
+        ${b ? `<div class="full small muted">Balance, minimum payment, due date and APR update from your bank on every sync.</div>
+        ${b.source !== 'liabilities' ? `<div><label>Payment amount</label><input data-edit="debt" data-f="payment" inputmode="decimal" placeholder="0.00" value="${d.payment ?? ''}"></div>` : ''}` : `
         <div><label>Starting balance</label><input data-edit="debt" data-f="balance" inputmode="decimal" placeholder="0.00" value="${d.balance ?? ''}"></div>
         <div><label>Payment amount</label><input data-edit="debt" data-f="payment" inputmode="decimal" placeholder="0.00" value="${d.payment ?? ''}"></div>
         <div><label>Frequency</label><select data-edit="debt" data-f="frequency">${opts(Object.entries(FREQS), d.frequency)}</select></div>
         <div><label>End date (optional)</label><input type="date" data-edit="debt" data-f="endDate" value="${h(d.endDate || '')}"></div>
+        <div><label>APR % (optional)</label><input data-edit="debt" data-f="apr" inputmode="decimal" placeholder="0" value="${d.apr ?? ''}"></div>`}
         <div><label>Spending category</label><select data-edit="debt" data-f="categoryId">${catOpts(d.categoryId, 'None')}</select></div>
         <div style="align-self:end"><button class="mini danger" data-act="delDebt">Delete debt</button></div></div></details>
       <details><summary>Payments (${d.payments.length}) · paid ${money(st.paid)}</summary>
@@ -306,10 +374,6 @@ function viewDebts() {
 
 function viewMore() {
   return `
-  <div class="card"><h2>Import bank CSV</h2>
-    <p class="small muted">Download transactions from your bank's online banking as CSV, then pick the file. Nothing leaves your phone.</p>
-    <input type="file" id="csvFile" accept=".csv,text/csv,text/plain">
-    <div id="impArea">${importHTML()}</div></div>
   <div class="card"><h2>Categories &amp; budgets</h2>
     <p class="small muted">Leave budget blank for no limit. Weekly budgets reset on your week-start day.</p>
     <details ${ui.catsOpen ? 'open' : ''} data-keep="catsOpen"><summary>Edit ${S.categories.length} categories</summary>
@@ -320,24 +384,31 @@ function viewMore() {
       <div class="full row"><label class="row" style="color:var(--text);flex:2"><input type="checkbox" data-edit="cat" data-f="income" ${c.income ? 'checked' : ''} style="flex:0"><span>Income category</span></label>
       <button class="mini danger" data-act="delCat" style="flex:0 0 auto">Delete</button></div></div>`).join('')}
     <button data-act="addCat" style="margin-top:.6rem">+ Add category</button></details></div>
-  <div class="card"><h2>Auto-categorize rules</h2>
-    <p class="small muted">If a bank description contains the keyword (not case sensitive), it gets that category. First match wins, top to bottom.</p>
-    <div class="grid2"><input id="rKw" placeholder="keyword e.g. sheetz"><select id="rCat">${catOpts('')}</select></div>
-    <button data-act="addRule" style="margin-top:.5rem">+ Add rule</button>
-    <details><summary>${S.rules.length} rules</summary><ul class="list">${S.rules.map(r => `<li data-id="${r.id}"><div class="grow"><b>${h(r.keyword)}</b> → ${h(catName(r.categoryId))}</div>
-      <button class="mini danger" data-act="delRule">✕</button></li>`).join('')}</ul></details></div>
-  <div class="card"><h2>Backup &amp; restore</h2>
-    <p class="small muted">Your data lives only in this browser on this phone. Export a backup regularly (e.g. to Google Drive) — clearing browser data or uninstalling deletes it.</p>
-    <div class="row"><button class="primary" data-act="export">Export backup (JSON)</button></div>
-    <label for="restoreFile">Restore from backup file</label><input type="file" id="restoreFile" accept=".json,application/json">
-    <details><summary class="bad">Danger zone</summary><button class="danger" data-act="reset">Erase all data &amp; start over</button></details></div>
-${syncCardHTML()}
   <div class="card"><h2>Settings</h2>
     <div class="grid2"><div><label for="sWeek">Week starts on</label><select id="sWeek" data-set="weekStart">${opts(['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].map((d, i) => [i, d]), S.settings.weekStart)}</select></div>
       <div><label for="sTheme">Theme</label><select id="sTheme" data-set="theme">${opts([['auto', 'Match phone'], ['light', 'Light'], ['dark', 'Dark']], S.settings.theme)}</select></div></div>
     <div class="grid2"><div><label for="sCdName">Countdown event name (optional)</label><input id="sCdName" data-set="countdownName" placeholder="e.g. Vacation" value="${h(S.settings.countdownName || '')}"></div>
       <div><label for="sCdDate">Countdown date (optional)</label><input id="sCdDate" type="date" data-set="countdownDate" value="${h(S.settings.countdownDate || '')}"></div></div>
-    <p class="small muted">v1.0 · ${S.transactions.length} transactions stored on this device.</p></div>`;
+    <p class="small muted">v2.1 · ${S.transactions.length} transactions stored on this device.</p></div>
+  <div class="card"><details id="advanced" data-keep="advOpen" ${ui.advOpen || ui.imp ? 'open' : ''}><summary><span style="font-size:1.05rem">Advanced</span>
+    <span class="muted small">· CSV import, rules, backup, bank sync</span></summary>
+  <section class="adv"><h3>Import bank CSV</h3>
+    <p class="small muted">Download transactions from your bank's online banking as CSV, then pick the file. Nothing leaves your phone.</p>
+    <input type="file" id="csvFile" accept=".csv,text/csv,text/plain">
+    <div id="impArea">${importHTML()}</div></section>
+  <section class="adv"><h3>Auto-categorize rules</h3>
+    <p class="small muted">If a bank description contains the keyword (not case sensitive), it gets that category. First match wins, top to bottom.</p>
+    <div class="grid2"><input id="rKw" placeholder="keyword e.g. sheetz"><select id="rCat">${catOpts('')}</select></div>
+    <button data-act="addRule" style="margin-top:.5rem">+ Add rule</button>
+    <details><summary>${S.rules.length} rules</summary><ul class="list">${S.rules.map(r => `<li data-id="${r.id}"><div class="grow"><b>${h(r.keyword)}</b> → ${h(catName(r.categoryId))}</div>
+      <button class="mini danger" data-act="delRule">✕</button></li>`).join('')}</ul></details></section>
+  <section class="adv"><h3>Backup &amp; restore</h3>
+    <p class="small muted">Your data lives only in this browser on this phone. Export a backup regularly (e.g. to Google Drive) — clearing browser data or uninstalling deletes it.</p>
+    <div class="row"><button class="primary" data-act="export">Export backup (JSON)</button></div>
+    <label for="restoreFile">Restore from backup file</label><input type="file" id="restoreFile" accept=".json,application/json">
+    <details><summary class="bad">Danger zone</summary><button class="danger" data-act="reset">Erase all data &amp; start over</button></details></section>
+${syncCardHTML()}
+  </details></div>`;
 }
 
 /* ---------- CSV ---------- */
@@ -453,12 +524,15 @@ async function onCsvFile(file) {
 }
 function doImport() {
   const im = ui.imp; const now = Date.now(); let n = 0;
+  const fresh = [];
   im.preview.filter(x => x.ok && x.on).forEach(x => {
-    S.transactions.push({ id: uid(), date: x.date, amount: x.amount, type: x.type, categoryId: x.categoryId || S.categories.find(c => c.name === 'Other')?.id || '',
-      note: x.desc, importDesc: x.desc, source: 'import', created: now + n++ });
+    const t = { id: uid(), date: x.date, amount: x.amount, type: x.type, categoryId: x.categoryId || S.categories.find(c => c.name === 'Other')?.id || '',
+      note: x.desc, importDesc: x.desc, source: 'import', created: now + n++ };
+    S.transactions.push(t); fresh.push(t);
   });
   S.csvMappings[im.sig] = { ...im.m };
-  save(); ui.imp = null; toast(`Imported ${n} transaction${n === 1 ? '' : 's'}`);
+  const made = autoPaychecks(fresh);
+  save(); ui.imp = null; toast(`Imported ${n} transaction${n === 1 ? '' : 's'}${payToast(made)}`);
   render(); const f = $('#csvFile'); if (f) f.value = '';
 }
 
@@ -469,7 +543,7 @@ const dayDiff = (a, b) => Math.round((parseISO(a) - parseISO(b)) / 864e5);
 const syncOn = () => !!S.sync.url;
 function syncCardHTML() {
   const y = S.sync, on = syncOn();
-  return `<div class="card" id="syncCard"><h2>Bank sync <span class="tag">optional</span></h2>
+  return `<section class="adv" id="syncCard"><h3>Bank sync <span class="tag">optional</span></h3>
     <details ${on ? 'open' : ''}><summary>${on ? (y.connected ? `Connected${y.institution ? ' to ' + h(y.institution) : ''}` : 'Not connected') : 'Set up automatic bank sync (advanced)'}</summary>
     <p class="small muted">Uses your own sync server (a free Cloudflare Worker) and Plaid. Your bank login goes only to Plaid; this phone never stores bank credentials or access tokens.</p>
     <label for="syUrl">Sync server URL</label><input id="syUrl" type="url" inputmode="url" placeholder="https://….workers.dev" value="${h(y.url)}" autocomplete="off">
@@ -477,10 +551,10 @@ function syncCardHTML() {
     <div class="row" style="margin-top:.6rem"><button data-act="syncSave">Save</button></div>
     ${on ? `<p class="small">${y.lastSync ? 'Last sync: ' + new Date(y.lastSync).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : 'Never synced'}
       ${y.accounts?.length ? '<br>Accounts: ' + y.accounts.map(a => h(`${a.name || 'Account'}${a.mask ? ' ••' + a.mask : ''}`)).join(', ') : ''}</p>
-      <div class="row">${y.connected ? `<button class="primary" data-act="syncNow">Sync now</button><button class="danger" data-act="syncDisconnect">Disconnect</button>`
+      <div class="row">${y.connected ? `<button class="primary" data-act="syncNow">Sync now</button>${y.needsCardConsent ? '<button data-act="syncConsent">Allow card details</button>' : ''}${y.loginRequired ? '<button data-act="syncRelogin">Fix bank login</button>' : ''}<button class="danger" data-act="syncDisconnect">Disconnect</button>`
         : `<button class="primary" data-act="syncConnect">Connect bank</button>`}</div>
       <p class="small muted" id="syncMsg"></p>` : ''}
-    </details></div>`;
+    </details></section>`;
 }
 async function syncApi(path, body = {}) {
   const y = S.sync;
@@ -501,43 +575,82 @@ function loadPlaid() {
     document.head.appendChild(sc); });
 }
 function syncMsg(t) { const m = $('#syncMsg'); if (m) m.textContent = t; }
-async function openLink(token, receivedRedirectUri) {
+async function openLink(token, receivedRedirectUri, mode = 'new') {
   const Plaid = await loadPlaid();
   const handler = Plaid.create({ token, ...(receivedRedirectUri ? { receivedRedirectUri } : {}),
     onSuccess: async (publicToken, meta) => {
-      sessionStorage.removeItem('plaidLinkToken');
+      sessionStorage.removeItem('plaidLinkToken'); sessionStorage.removeItem('plaidLinkMode');
+      if (mode === 'update') {   // existing Item re-authorized / extra consent granted: nothing to exchange
+        Object.assign(S.sync, { needsCardConsent: false, loginRequired: false }); save(); render(); await syncNow(); return;
+      }
       try {
         const r = await syncApi('exchange', { public_token: publicToken, institution: meta?.institution?.name || null });
         Object.assign(S.sync, { connected: true, institution: r.institution, cursor: '' }); save(); render();
         await syncNow();
       } catch (e) { toast(e.message); }
     },
-    onExit: err => { sessionStorage.removeItem('plaidLinkToken'); if (err) toast(err.display_message || err.error_message || 'Bank connection cancelled'); } });
+    onExit: err => { sessionStorage.removeItem('plaidLinkToken'); sessionStorage.removeItem('plaidLinkMode'); if (err) toast(err.display_message || err.error_message || 'Bank connection cancelled'); } });
   handler.open();
+}
+async function openUpdate(addLiabilities) {   // Link update mode on the existing Item (no new connection)
+  try {
+    const { link_token } = await syncApi('update-link-token', { add_liabilities: !!addLiabilities });
+    sessionStorage.setItem('plaidLinkToken', link_token); sessionStorage.setItem('plaidLinkMode', 'update');
+    await openLink(link_token, null, 'update');
+  } catch (e) { toast(e.message); }
 }
 let syncing = false;
 async function syncNow(quiet) {
   if (syncing || !syncOn() || !S.sync.connected) return; syncing = true; syncMsg('Syncing…');
-  const tot = { added: 0, matched: 0, updated: 0, removed: 0 };
+  const tot = { added: 0, matched: 0, updated: 0, removed: 0 }; const made = [];
   try {
     for (let i = 0; i < 20; i++) {
       const r = await syncApi('sync', { cursor: S.sync.cursor || '' });
-      const c = applySync(r); for (const k in tot) tot[k] += c[k];
+      const c = applySync(r); for (const k in tot) tot[k] += c[k]; made.push(...c.paychecks);
       if (r.accounts?.length) S.sync.accounts = r.accounts;
       S.sync.cursor = r.next_cursor; save();            // cursor saved only after the batch is applied
       if (!r.has_more) break;
     }
-    S.sync.lastSync = new Date().toISOString(); save(); render();
-    if (!quiet || tot.added) toast(`Bank sync: ${tot.added} new, ${tot.matched} matched, ${tot.updated} updated, ${tot.removed} removed`);
+    let cards = 0;
+    try { cards = applyCards(await syncApi('liabilities')); }
+    catch (e) { if (e.code === 'NOT_CONNECTED' || e.code === 'ITEM_LOGIN_REQUIRED') throw e; console.warn('card details unavailable', e.message); }
+    S.sync.lastSync = new Date().toISOString(); S.sync.loginRequired = false; save(); render();
+    if (!quiet || tot.added || made.length || cards) toast(`Bank sync: ${tot.added} new, ${tot.matched} matched, ${tot.updated} updated, ${tot.removed} removed${cards ? ` · ${cards} card${cards === 1 ? '' : 's'} added to Debts` : ''}${payToast(made)}`);
   } catch (e) {
     if (e.code === 'NOT_CONNECTED') { S.sync.connected = false; save(); render(); }
-    if (!quiet) toast(e.code === 'ITEM_LOGIN_REQUIRED' ? 'Your bank needs you to log in again: Disconnect, then Connect bank.' : e.message);
+    if (e.code === 'ITEM_LOGIN_REQUIRED') { S.sync.loginRequired = true; save(); render(); }
+    if (!quiet) toast(e.code === 'ITEM_LOGIN_REQUIRED' ? 'Your bank needs you to log in again. Tap "Fix bank login".' : e.message);
     syncMsg(e.message);
   } finally { syncing = false; }
 }
+/* Upsert one Debt per bank credit card. Manual debts are never touched; a card is never duplicated. Returns # of new cards. */
+function applyCards(r) {
+  let added = 0; const y = S.sync;
+  const tcat = S.categories.find(c => /transfer/i.test(c.name))?.id || '';
+  for (const c of r.cards || []) {
+    if (!c?.account_id || (y.ignoredCards || []).includes(c.account_id)) continue;
+    let d = S.debts.find(x => x.bank?.account_id === c.account_id)
+      || S.debts.find(x => !x.bank && x.formerBank && x.formerBank.mask === c.mask && c.mask);   // relink after a reconnect
+    if (!d) {
+      d = { id: uid(), name: `${c.name || 'Credit card'}${c.mask ? ' ••' + c.mask : ''}`, balance: null, payment: null, frequency: 'monthly',
+        endDate: '', categoryId: tcat, payments: [] };
+      S.debts.push(d); added++;
+    }
+    d.bank = { account_id: c.account_id, mask: c.mask, source: r.source }; delete d.formerBank;
+    if (c.balance_current != null) { d.balance = Math.max(0, r2(c.balance_current)); d.balanceAsOf = today(); }
+    if (c.limit != null) d.limit = c.limit;
+    if (r.source === 'liabilities') {
+      d.payment = c.minimum_payment; d.frequency = 'monthly';
+      d.apr = c.apr; d.dueDate = c.next_due_date; d.lastStatement = c.last_statement_balance; d.overdue = c.is_overdue;
+    }
+  }
+  y.needsCardConsent = !!r.needs_consent;
+  return added;
+}
 /* Merge a /sync response into S.transactions. Returns counts. Pure apart from mutating S. */
 function applySync(r) {
-  const n = { added: 0, matched: 0, updated: 0, removed: 0 };
+  const n = { added: 0, matched: 0, updated: 0, removed: 0, touched: [] };
+  const transferCat = S.categories.find(c => /transfer/i.test(c.name))?.id;
   const incomeCat = S.categories.find(c => c.income)?.id, otherCat = S.categories.find(c => c.name === 'Other')?.id || '';
   for (const b of [...(r.added || []), ...(r.modified || [])]) {
     if (!b || !b.transaction_id || !b.date || !b.amount) continue;
@@ -545,16 +658,16 @@ function applySync(r) {
     // 1) same Plaid id, or the posted version of a pending one we already have
     let t = S.transactions.find(x => x.plaidId === b.transaction_id)
       || (b.pending_transaction_id && S.transactions.find(x => x.plaidId === b.pending_transaction_id));
-    if (t) { Object.assign(t, { plaidId: b.transaction_id, date: b.date, amount, type, pending: !!b.pending }); if (t.source === 'bank') t.importDesc = desc; n.updated++; continue; }
+    if (t) { Object.assign(t, { plaidId: b.transaction_id, date: b.date, amount, type, pending: !!b.pending }); if (t.source === 'bank') t.importDesc = desc; n.updated++; n.touched.push(t); continue; }
     // 2) soft match against manual / CSV / debt entries: same direction, same amount, within 3 days (closest wins)
     const cand = S.transactions.filter(x => !x.plaidId && x.type === type && Math.abs(x.amount - amount) < 0.005 && Math.abs(dayDiff(x.date, b.date)) <= 3)
       .sort((x, y) => Math.abs(dayDiff(x.date, b.date)) - Math.abs(dayDiff(y.date, b.date)))[0];
-    if (cand) { cand.plaidId = b.transaction_id; cand.pending = !!b.pending; n.matched++; continue; }
+    if (cand) { cand.plaidId = b.transaction_id; cand.pending = !!b.pending; n.matched++; n.touched.push(cand); continue; }
     // 3) new
-    S.transactions.push({ id: uid(), date: b.date, amount, type, pending: !!b.pending,
-      categoryId: autoCat(`${desc} ${b.merchant_name || ''}`) || (type === 'income' ? incomeCat : otherCat) || '',
-      note: b.merchant_name || desc, importDesc: desc, source: 'bank', plaidId: b.transaction_id, created: Date.now() + n.added });
-    n.added++;
+    const nt = { id: uid(), date: b.date, amount, type, pending: !!b.pending,
+      categoryId: autoCat(`${desc} ${b.merchant_name || ''}`) || (/^(TRANSFER|LOAN_PAYMENTS)/.test(b.category || '') && transferCat) || (type === 'income' ? incomeCat : otherCat) || '',
+      note: b.merchant_name || desc, importDesc: desc, source: 'bank', plaidId: b.transaction_id, created: Date.now() + n.added };
+    S.transactions.push(nt); n.touched.push(nt); n.added++;
   }
   for (const x of r.removed || []) {
     const t = S.transactions.find(y => y.plaidId === x.transaction_id); if (!t) continue;
@@ -562,6 +675,7 @@ function applySync(r) {
     else { delete t.plaidId; delete t.pending; }   // never delete something you entered yourself
     n.removed++;
   }
+  n.paychecks = autoPaychecks(n.touched);
   return n;
 }
 Object.assign(actions_sync, {
@@ -577,15 +691,18 @@ Object.assign(actions_sync, {
   },
   syncConnect: async () => {
     try { syncMsg('Opening Plaid…'); const { link_token } = await syncApi('link-token');
-      sessionStorage.setItem('plaidLinkToken', link_token); await openLink(link_token); syncMsg(''); }
+      sessionStorage.setItem('plaidLinkToken', link_token); sessionStorage.setItem('plaidLinkMode', 'new'); await openLink(link_token); syncMsg(''); }
     catch (e) { toast(e.message); syncMsg(e.message); }
   },
   syncNow: () => syncNow(false),
+  syncConsent: () => openUpdate(true),
+  syncRelogin: () => openUpdate(false),
   syncDisconnect: async () => {
     if (!confirm('Disconnect your bank? Transactions already synced stay in the app.')) return;
     try { await syncApi('remove'); } catch (e) { if (e.code !== 'NOT_CONNECTED' && !confirm(`${e.message}\n\nForget the connection on this phone anyway?`)) return; }
     S.transactions.forEach(t => { delete t.plaidId; delete t.pending; });   // a reconnect gets new ids; soft-match will relink
-    Object.assign(S.sync, { connected: false, institution: null, cursor: '', accounts: [] }); save(); render(); toast('Bank disconnected');
+    S.debts.forEach(d => { if (d.bank) { d.formerBank = { mask: d.bank.mask }; delete d.bank; } });   // cards become manual; relinked by last-4 on reconnect
+    Object.assign(S.sync, { connected: false, institution: null, cursor: '', accounts: [], needsCardConsent: false, loginRequired: false, ignoredCards: [] }); save(); render(); toast('Bank disconnected');
   }
 });
 
@@ -596,8 +713,10 @@ const actions = {
   savePay: () => {
     const amount = num($('#payAmt').value), date = $('#payDate').value || today();
     if (!(amount > 0)) return toast('Enter the paycheck amount first.');
+    const ws = weekStartOf(date, S.settings.weekStart), we = addDays(ws, 6);
+    S.paychecks = S.paychecks.filter(p => !(p.auto && p.date >= ws && p.date <= we));   // manual entry wins
     const ex = S.paychecks.find(p => p.date === date);
-    if (ex) ex.amount = amount; else S.paychecks.push({ id: uid(), date, amount });
+    if (ex) { ex.amount = amount; delete ex.auto; delete ex.txnId; } else S.paychecks.push({ id: uid(), date, amount });
     ui.planPay = amount; ui.planDate = date; save(); render(); toast('Paycheck saved');
   },
   loadPay: el => { const p = find(S.paychecks, el); ui.planPay = p.amount; ui.planDate = p.date; render(); scrollTo(0, 0); },
@@ -623,9 +742,11 @@ const actions = {
   },
   editTxn: el => { ui.editTxn = el.closest('[data-id]').dataset.id; render(); scrollTo(0, 0); },
   cancelEdit: () => { ui.editTxn = null; render(); },
-  delTxn: el => { const t = find(S.transactions, el); if (confirm(`Delete ${money(t.amount)} ${t.note || ''}?`)) { S.transactions = S.transactions.filter(x => x !== t); save(); render(); } },
+  delTxn: el => { const t = find(S.transactions, el); if (confirm(`Delete ${money(t.amount)} ${t.note || ''}?`)) { S.transactions = S.transactions.filter(x => x !== t); autoPaychecks([]); save(); render(); } },
   addDebt: () => { S.debts.push({ id: uid(), name: 'New debt', balance: null, payment: null, frequency: 'monthly', endDate: '', categoryId: '', payments: [] }); save(); render(); },
-  delDebt: el => { const d = find(S.debts, el); if (confirm(`Delete "${d.name}" and its payment history?`)) { S.debts = S.debts.filter(x => x !== d); save(); render(); } },
+  delDebt: el => { const d = find(S.debts, el); if (confirm(`Delete "${d.name}" and its payment history?${d.bank ? ' It will not be re-added by bank sync.' : ''}`)) {
+    if (d.bank) S.sync.ignoredCards = [...(S.sync.ignoredCards || []), d.bank.account_id];
+    S.debts = S.debts.filter(x => x !== d); save(); render(); } },
   logPay: el => { ui.logDebt = el.closest('[data-id]').dataset.id; render(); },
   cancelLog: () => { ui.logDebt = null; render(); },
   savePayment: el => {
@@ -678,7 +799,7 @@ document.addEventListener('change', async e => {
     const coll = { alloc: S.allocations, bill: S.bills, debt: S.debts, cat: S.categories }[el.dataset.edit];
     const item = find(coll, el), f = el.dataset.f;
     let v = el.type === 'checkbox' ? el.checked : el.value;
-    if (['value', 'amount', 'balance', 'payment', 'budget'].includes(f)) { v = num(v); if (v != null && v < 0) v = Math.abs(v); }
+    if (['value', 'amount', 'balance', 'payment', 'budget', 'apr'].includes(f)) { v = num(v); if (v != null && v < 0) v = Math.abs(v); }
     item[f] = v; save();
     if (el.tagName === 'SELECT' || el.type === 'checkbox' || el.type === 'date') render();
     else { ui.dirty = true; if ($('#planOut')) $('#planOut').innerHTML = planHTML(ui.planPay); }
@@ -698,7 +819,7 @@ async function restore(file) {
     const j = JSON.parse(await file.text()); const d = j.data || j;
     if (!Array.isArray(d.categories) || !Array.isArray(d.transactions)) throw new Error('Not a budget backup');
     if (!confirm(`Replace current data with backup (${d.transactions.length} transactions${j.exported ? ', from ' + new Date(j.exported).toLocaleDateString() : ''})?`)) return;
-    const def = defaults(), pc = S.sync?.passcode || ''; S = { ...def, ...d, settings: { ...def.settings, ...(d.settings || {}) }, sync: { ...blankSync(), ...(d.sync || {}) } }; if (!S.sync.passcode) S.sync.passcode = pc; save(); render(); toast('Backup restored');
+    const def = defaults(), pc = S.sync?.passcode || ''; S = { ...def, ...d, settings: { ...def.settings, ...(d.settings || {}) }, sync: { ...blankSync(), ...(d.sync || {}) } }; if (!S.sync.passcode) S.sync.passcode = pc; migrate(); save(); render(); toast('Backup restored');
   } catch (err) { alert('Could not restore: ' + err.message); }
 }
 
@@ -711,8 +832,8 @@ if (navigator.storage && navigator.storage.persist) navigator.storage.persist().
 // Resume Plaid Link after an OAuth bank redirect, then auto-sync at most every 6 hours when connected.
 if (syncOn() && /[?&]oauth_state_id=/.test(location.search) && sessionStorage.getItem('plaidLinkToken')) {
   const href = location.href; history.replaceState(null, '', location.pathname);
-  openLink(sessionStorage.getItem('plaidLinkToken'), href).catch(e => toast(e.message));
+  openLink(sessionStorage.getItem('plaidLinkToken'), href, sessionStorage.getItem('plaidLinkMode') || 'new').catch(e => toast(e.message));
 } else if (syncOn() && S.sync.connected && navigator.onLine && (!S.sync.lastSync || Date.now() - Date.parse(S.sync.lastSync) > 6 * 3600e3)) {
   setTimeout(() => syncNow(true), 1500);
 }
-window.__budget = { get state() { return S; }, parseCSV, parseDate, autoCat, computePlan, debtStatus, applySync };
+window.__budget = { get state() { return S; }, parseCSV, parseDate, autoCat, computePlan, debtStatus, applySync, applyCards, safeToSpend };
