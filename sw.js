@@ -1,5 +1,5 @@
 /* Offline cache for the app shell. Bump VERSION when any file changes. */
-const VERSION = 'budget-v2.1.0';
+const VERSION = 'budget-v2.2.0';
 const ASSETS = [
   './', './index.html', './styles.css', './app.js', './manifest.json',
   './icons/icon-192.png', './icons/icon-512.png', './icons/icon-maskable-512.png',

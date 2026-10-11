@@ -69,7 +69,8 @@ function defaults() {
   const alloc = (name, type, catName) => ({ id: uid(), name, type, value: null, categoryId: catName ? id(catName) : '' });
   return {
     version: 1,
-    settings: { weekStart: 1, theme: 'auto', includeDebts: true, countdownDate: '', countdownName: '', paycheckKeyword: '' },
+    settings: { weekStart: 1, theme: 'auto', includeDebts: true, countdownDate: '', countdownName: '', paycheckKeyword: '',
+      autoWork: { on: false, days: [1, 2, 3, 4, 5], cats: [id('Hotels/Lodging')] } },
     categories: cats,
     allocations: [alloc('Hotels/Lodging', 'fixed', 'Hotels/Lodging'), alloc('Gas', 'fixed', 'Gas'),
       alloc('Food', 'fixed', 'Food'),
@@ -80,6 +81,7 @@ function defaults() {
     debts: [],
     rules,
     csvMappings: {},
+    goals: [], work: { days: {} }, checkins: [], subStatus: {},
     sync: blankSync()
   };
 }
@@ -97,6 +99,13 @@ function migrate() {   // upgrade older saved data / backups in place
     S.settings.migrated21 = true;
   }
   if (typeof S.settings.paycheckKeyword !== 'string') S.settings.paycheckKeyword = '';
+  // v2.2: goals, work days, check-ins, subscription marks
+  if (!Array.isArray(S.goals)) S.goals = [];
+  S.goals.forEach(g => { if (!Array.isArray(g.contributions)) g.contributions = []; if (g.inSafe === undefined) g.inSafe = true; });
+  if (!S.work || typeof S.work.days !== 'object') S.work = { days: {} };
+  if (!Array.isArray(S.checkins)) S.checkins = [];
+  if (!S.subStatus || typeof S.subStatus !== 'object') S.subStatus = {};
+  if (!S.settings.autoWork) S.settings.autoWork = { on: false, days: [1, 2, 3, 4, 5], cats: S.categories.filter(c => /lodg|hotel/i.test(c.name)).map(c => c.id) };
 }
 let S = load(); migrate();
 function save() {
@@ -175,10 +184,11 @@ function safeToSpend(ref = today()) {
   if (!pc) { pc = [...S.paychecks].sort((a, b) => b.date.localeCompare(a.date))[0]; basis = 'planned'; }
   if (!pc) return null;
   const plan = computePlan(pc.amount);
+  const goals = r2(sum(S.goals.filter(g => g.inSafe), g => goalStatus(g).weekly));
   const savings = r2(sum(plan.allocLines.filter(isSavingsAlloc), a => a.amt));
   const spentTx = S.transactions.filter(t => t.type !== 'income' && t.source !== 'debt' && t.date >= ws && t.date <= we && !nonSpending(catById(t.categoryId)));
   const spent = r2(sum(spentTx, t => t.amount));
-  return { ws, we, pay: pc.amount, basis, auto: !!pc.auto, setAside: plan.billTotal, savings, spent, safe: r2(pc.amount - plan.billTotal - savings - spent) };
+  return { ws, we, pay: pc.amount, basis, auto: !!pc.auto, setAside: plan.billTotal, savings, goals, spent, safe: r2(pc.amount - plan.billTotal - savings - goals - spent) };
 }
 /* Create this week's paycheck from an incoming deposit that matches the Paycheck keyword (never duplicates a week). */
 function autoPaychecks(txns) {
@@ -196,6 +206,108 @@ function autoPaychecks(txns) {
   return made;
 }
 const payToast = made => made.length ? ` · Paycheck added: ${made.map(p => money(p.amount)).join(', ')}` : '';
+
+/* ---------- goals ---------- */
+function goalStatus(g) {
+  const saved = r2(sum(g.contributions || [], c => c.amount));
+  const target = g.target > 0 ? g.target : null;
+  const left = target ? Math.max(0, r2(target - saved)) : null;
+  const days = g.date ? dayDiff(g.date, today()) : null;
+  const weeks = days == null ? null : Math.max(1, Math.ceil((days + 1) / 7));
+  const weekly = left && weeks ? r2(left / weeks) : 0;
+  return { saved, target, left, days, weeks, weekly, pct: target ? Math.min(100, saved / target * 100) : 0, done: !!target && saved >= target };
+}
+/* ---------- work weeks ---------- */
+const catIdsBy = re => S.categories.filter(c => re.test(c.name)).map(c => c.id);
+function isWorkDay(d) {
+  if (S.work.days[d]) return 'tag';
+  const a = S.settings.autoWork;
+  if (a?.on && a.days.includes(parseISO(d).getDay()) && S.transactions.some(t => t.date === d && t.type !== 'income' && a.cats.includes(t.categoryId))) return 'auto';
+  return null;
+}
+function workWeeks() {
+  const L = catIdsBy(/lodg|hotel/i), G = catIdsBy(/gas|fuel/i), F = catIdsBy(/food|grocer|dining/i);
+  const days = new Set([...Object.keys(S.work.days).filter(d => S.work.days[d]), ...S.transactions.map(t => t.date)]);
+  const weeks = new Map();
+  for (const d of days) {
+    if (!isWorkDay(d)) continue;
+    const ws = weekStartOf(d, S.settings.weekStart);
+    const w = weeks.get(ws) || { ws, days: 0, lodging: 0, gas: 0, food: 0 }; w.days++;
+    for (const t of S.transactions) if (t.date === d && t.type !== 'income') {
+      if (L.includes(t.categoryId)) w.lodging += t.amount; else if (G.includes(t.categoryId)) w.gas += t.amount; else if (F.includes(t.categoryId)) w.food += t.amount;
+    }
+    weeks.set(ws, w);
+  }
+  const list = [...weeks.values()].map(w => ({ ...w, lodging: r2(w.lodging), gas: r2(w.gas), food: r2(w.food), total: r2(w.lodging + w.gas + w.food) }))
+    .sort((a, b) => b.ws.localeCompare(a.ws));
+  return { list, avg: list.length ? r2(sum(list, w => w.total) / list.length) : 0 };
+}
+/* ---------- weekly check-in ---------- */
+function weekSummary(ws) {
+  const we = addDays(ws, 6), inW = t => t.date >= ws && t.date <= we;
+  let income = r2(sum(S.transactions.filter(t => t.type === 'income' && inW(t)), t => t.amount));
+  if (!income) income = r2(sum(S.paychecks.filter(inW), p => p.amount));
+  const exp = S.transactions.filter(t => t.type !== 'income' && t.source !== 'debt' && inW(t));
+  const cats = S.categories.filter(c => !nonSpending(c)).map(c => {
+    const spent = r2(sum(exp.filter(t => t.categoryId === c.id), t => t.amount));
+    const budget = c.budget > 0 ? r2(c.period === 'month' ? c.budget * 12 / 52 : c.budget) : null;
+    return { name: c.name, spent, budget, diff: budget == null ? null : r2(budget - spent) };
+  }).filter(x => x.spent > 0 || x.budget);
+  const spent = r2(sum(exp.filter(t => !nonSpending(catById(t.categoryId))), t => t.amount));
+  const budget = r2(sum(cats.filter(c => c.budget), c => c.budget));
+  const debtPaid = r2(sum(S.debts.flatMap(d => d.payments || []).filter(inW), p => p.amount));
+  const saved = r2(sum(S.goals.flatMap(g => g.contributions || []).filter(inW), c => c.amount));
+  return { ws, we, income, spent, budget, cats, debtPaid, saved };
+}
+function dueCheckin() {
+  const prev = addDays(periodRange('week')[0], -7), end = addDays(prev, 6);
+  if (S.checkins.some(c => c.ws === prev)) return null;
+  if (!S.transactions.some(t => t.date <= end) && !S.paychecks.some(p => p.date <= end)) return null;   // nothing to report yet
+  return weekSummary(prev);
+}
+function checkinHTML(c, full) {
+  return `<table><tbody>
+    <tr><td>Income</td><td class="num good">${money(c.income)}</td></tr>
+    <tr><td>Spent${c.budget ? ` <span class="muted small">of ${money(c.budget)} budget</span>` : ''}</td><td class="num ${c.budget && c.spent > c.budget ? 'bad' : ''}">${money(c.spent)}</td></tr>
+    ${c.debtPaid ? `<tr><td>Debt paid</td><td class="num">${money(c.debtPaid)}</td></tr>` : ''}
+    ${c.saved ? `<tr><td>Saved toward goals</td><td class="num">${money(c.saved)}</td></tr>` : ''}
+    ${(full ? c.cats : c.cats.filter(x => x.budget)).map(x => `<tr><td class="small">${h(x.name)}</td><td class="num small ${x.diff != null && x.diff < 0 ? 'bad' : ''}">${money(x.spent)}${x.diff != null ? ` · ${x.diff < 0 ? 'over ' + money(-x.diff) : 'under ' + money(x.diff)}` : ''}</td></tr>`).join('')}
+  </tbody></table>`;
+}
+/* ---------- subscriptions ---------- */
+const merchKey = s => String(s || '').toLowerCase().replace(/[#*]/g, ' ').replace(/\b[\d-]+\b/g, ' ').replace(/[^a-z& ]/g, ' ')
+  .replace(/\s+/g, ' ').trim().split(' ').slice(0, 3).join(' ');
+const PER_MONTH = { weekly: 52 / 12, biweekly: 26 / 12, semimonthly: 2, monthly: 1, quarterly: 1 / 3, yearly: 1 / 12 };
+function detectSubs() {
+  const groups = new Map();
+  for (const t of S.transactions) {
+    if (t.type === 'income' || t.source === 'debt') continue;
+    const c = catById(t.categoryId); if (c && (c.income || /transfer|saving/i.test(c.name))) continue;
+    const k = merchKey(t.importDesc || t.note); if (k.length < 3) continue;
+    if (!groups.has(k)) groups.set(k, []); groups.get(k).push(t);
+  }
+  const out = [];
+  for (const [k, arr] of groups) {
+    if (arr.length < 2) continue;
+    arr.sort((a, b) => a.date.localeCompare(b.date));
+    const gaps = arr.slice(1).map((t, i) => dayDiff(t.date, arr[i].date)).filter(g => g > 0); if (!gaps.length) continue;
+    const med = [...gaps].sort((a, b) => a - b)[Math.floor(gaps.length / 2)];
+    const cadence = med >= 5 && med <= 9 ? 'weekly' : med >= 12 && med <= 17 ? 'biweekly' : med >= 26 && med <= 35 ? 'monthly' : med >= 350 && med <= 380 ? 'yearly' : null;
+    if (!cadence || gaps.some(g => Math.abs(g - med) > Math.max(3, med * 0.4))) continue;
+    const amts = arr.map(t => t.amount), avg = sum(amts) / amts.length;
+    if (Math.max(...amts) - Math.min(...amts) > Math.max(1, avg * 0.15)) continue;   // amount must be steady
+    const last = arr.at(-1);
+    out.push({ key: 'tx:' + k, name: last.note || k, cadence, amount: last.amount, monthly: r2(avg * PER_MONTH[cadence]), last: last.date, count: arr.length, source: 'detected', mk: k });
+  }
+  for (const b of S.bills) {
+    if (!(b.amount > 0)) continue;
+    const bk = merchKey(b.name).split(' ')[0];
+    const hit = bk && bk.length >= 3 ? S.transactions.filter(t => t.type !== 'income' && merchKey(t.importDesc || t.note).includes(bk)).sort((a, z) => z.date.localeCompare(a.date))[0] : null;
+    for (let i = out.length - 1; i >= 0; i--) if (bk && bk.length >= 3 && out[i].mk.includes(bk)) out.splice(i, 1);   // listed bill wins over detected copy
+    out.push({ key: 'bill:' + b.id, name: b.name || 'Bill', cadence: b.frequency, amount: b.amount, monthly: r2(b.amount * (PER_MONTH[b.frequency] || 1)), last: hit?.date || null, source: 'bill' });
+  }
+  return out.map(x => ({ ...x, yearly: r2(x.monthly * 12), status: S.subStatus[x.key] || null })).sort((a, b) => b.monthly - a.monthly);
+}
 
 /* ---------- views ---------- */
 let tab = 'home';
@@ -227,16 +339,23 @@ function viewHome() {
         <tr><td>Paycheck <span class="tag">${st.basis === 'planned' ? 'planned' : st.auto ? 'deposit' : 'this week'}</span></td><td class="num">${money(st.pay)}</td></tr>
         <tr><td>Bills &amp; debt set-asides</td><td class="num">−${money(st.setAside)}</td></tr>
         <tr><td>Savings</td><td class="num">−${money(st.savings)}</td></tr>
+        ${st.goals ? `<tr><td>Savings goals</td><td class="num">−${money(st.goals)}</td></tr>` : ''}
         <tr><td>Spent so far</td><td class="num">−${money(st.spent)}</td></tr></tbody></table></details>`
       : `<div class="huge muted" id="safeNum">—</div><p class="small muted">Enter your paycheck on the <b>Paycheck</b> tab to see this.</p>`}
     <div class="row" style="margin-top:.6rem"><button class="primary" data-act="goto" data-tab="spend">+ Add spending</button>
       ${y.url && y.connected ? `<button data-act="syncNow" id="homeSync">⟳ Sync now</button>` : ''}</div>
     ${y.url && y.connected && y.lastSync ? `<div class="small muted" style="margin-top:.3rem">Bank synced ${new Date(y.lastSync).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</div>` : ''}
   </div>
+  ${(() => { const c = dueCheckin(); return c ? `<div class="card" id="checkinCard"><div class="row"><h2 style="margin:0">Last week · ${fmtShort(c.ws)} – ${fmtShort(c.we)}</h2>
+    <button class="mini" data-act="dismissCheckin" data-ws="${c.ws}" style="flex:0 0 auto">Got it</button></div>${checkinHTML(c)}</div>` : ''; })()}
   ${y.loginRequired ? consentCardHTML() : ''}
   ${overs.map(o => `<div class="alert">⚠ <b>${h(o.c.name)}</b> is over budget by ${money(o.s - o.c.budget)} ${o.c.period === 'month' ? 'this month' : 'this week'}.</div>`).join('')}
   ${days != null && days >= 0 ? `<div class="card compact"><b>${h(wn)}</b> · ${fmtDate(wd)} — ${days === 0 ? 'today! 🎉' : `${days} day${days === 1 ? '' : 's'} to go`}</div>` : ''}
   ${rows.length ? `<div class="card compact"><h2>Budgets</h2>${budgetHTML(rows)}</div>` : ''}
+  ${S.goals.length ? `<div class="card compact" id="homeGoals"><h2>Goals</h2>${S.goals.map(g => { const gs = goalStatus(g); return `<div class="budget">
+    <div class="head"><span>${h(g.name)}${g.date ? ` <span class="tag">${gs.days < 0 ? 'past due' : fmtShort(g.date)}</span>` : ''}</span><span class="amt">${money(gs.saved)}${gs.target ? ' / ' + money(gs.target) : ''}</span></div>
+    ${gs.target ? `<div class="bar"><i style="width:${gs.pct.toFixed(1)}%"></i></div>` : ''}
+    <div class="small muted">${gs.done ? 'Reached! 🎉' : gs.weekly ? `${money(gs.weekly)}/week needed` : gs.target ? 'Add a target date to see the weekly amount' : 'Add a target amount to see the weekly amount'}</div></div>`; }).join('')}</div>` : ''}
   ${S.debts.length ? `<div class="card compact"><h2>Debts <span class="muted small">· ${money(debtLeft)} left</span></h2><ul class="list">${S.debts.map(d => { const ds = debtStatus(d); return `<li><div class="grow"><div class="t">${h(d.name)}${d.bank ? ' <span class="tag">bank</span>' : ''}</div>
       <div class="small muted">${d.bank && d.dueDate ? `Due ${fmtShort(d.dueDate)}${d.payment ? ' · min ' + money(d.payment) : ''}` : ds.projected ? 'Payoff ~' + fmtDate(ds.projected) : 'Enter balance & payment'}${ds.behind ? ' <span class="tag bad">past end date</span>' : ''}</div></div>
       <span class="amt">${money(ds.remaining)}</span></li>`; }).join('')}</ul></div>` : ''}`;
@@ -372,8 +491,69 @@ function viewDebts() {
   }).join('') + `<button class="primary" data-act="addDebt">+ Add debt</button>`;
 }
 
+function goalsHTML() {
+  const txOpts = S.transactions.filter(t => { const c = catById(t.categoryId); return c && /transfer|saving/i.test(c.name) && t.date >= addDays(today(), -60)
+    && !S.goals.some(g => g.contributions.some(x => x.txnId === t.id)); }).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 25);
+  return `<div class="card" id="goalsCard"><h2>Savings goals</h2>
+    ${S.goals.map(g => { const gs = goalStatus(g); return `<div class="editor-row goal" data-id="${g.id}">
+      <div class="full row"><b style="flex:1">${h(g.name)}</b><span class="amt">${money(gs.saved)}${gs.target ? ' / ' + money(gs.target) : ''}</span></div>
+      ${gs.target ? `<div class="full bar"><i style="width:${gs.pct.toFixed(1)}%"></i></div>` : ''}
+      <div class="full small ${gs.done ? 'good' : 'muted'}">${gs.done ? 'Reached! 🎉' : gs.weekly ? `<b>${money(gs.weekly)}/week</b> for ${gs.weeks} more week${gs.weeks === 1 ? '' : 's'} (${money(gs.left)} to go)` : gs.target ? 'Set a target date to see the weekly amount.' : 'Set a target amount to see the weekly amount.'}</div>
+      <div class="full row"><button class="mini primary" data-act="logContrib">+ Add to goal</button></div>
+      ${ui.goalLog === g.id ? `<div class="full"><div class="grid2"><div><label>Amount</label><input id="gcAmt" inputmode="decimal" placeholder="0.00"></div>
+        <div><label>Date</label><input id="gcDate" type="date" value="${today()}"></div></div>
+        <label>…or use a transfer you already recorded</label><select id="gcTxn"><option value="">— none —</option>${txOpts.map(t => `<option value="${t.id}">${fmtShort(t.date)} · ${h(t.note || catName(t.categoryId))} · ${money(t.amount)}</option>`).join('')}</select>
+        <div class="row" style="margin-top:.4rem"><button class="primary" data-act="saveContrib">Save</button><button data-act="cancelContrib">Cancel</button></div></div>` : ''}
+      <details class="full"><summary class="small">Edit goal · ${g.contributions.length} contribution${g.contributions.length === 1 ? '' : 's'}</summary>
+        <div class="grid2"><div class="full" style="grid-column:1/-1"><label>Name</label><input data-edit="goal" data-f="name" value="${h(g.name)}"></div>
+        <div><label>Target amount</label><input data-edit="goal" data-f="target" inputmode="decimal" placeholder="0.00" value="${g.target ?? ''}"></div>
+        <div><label>Target date</label><input type="date" data-edit="goal" data-f="date" value="${h(g.date || '')}"></div></div>
+        <label class="row" style="color:var(--text)"><input type="checkbox" data-edit="goal" data-f="inSafe" ${g.inSafe ? 'checked' : ''} style="flex:0"><span>Set aside the weekly amount in Safe to spend</span></label>
+        <ul class="list">${[...g.contributions].sort((a, b) => b.date.localeCompare(a.date)).map(c => `<li data-cid="${c.id}"><div class="grow small">${fmtDate(c.date)}${c.txnId ? ' <span class="tag">transfer</span>' : ''}</div>
+          <span class="amt">${money(c.amount)}</span><button class="mini danger" data-act="delContrib">✕</button></li>`).join('')}</ul>
+        <button class="mini danger" data-act="delGoal">Delete goal</button></details></div>`; }).join('') || '<p class="muted small">No goals yet.</p>'}
+    <button data-act="addGoal" style="margin-top:.6rem">+ Add goal</button></div>`;
+}
+function workHTML() {
+  const ww = workWeeks(), a = S.settings.autoWork, ws0 = periodRange('week')[0];
+  const order = Array.from({ length: 7 }, (_, i) => (S.settings.weekStart + i) % 7);
+  const weeks = Array.from({ length: 6 }, (_, i) => addDays(ws0, -7 * i));
+  return `<div class="card" id="workCard"><details data-keep="workOpen" ${ui.workOpen ? 'open' : ''}><summary><span style="font-size:1.05rem">Work weeks</span>
+    <span class="muted small">· ${ww.list.length ? `avg ${money(ww.avg)}/work week` : 'tag work-trip days'}</span></summary>
+    <p class="small muted">Tap days you were on a work trip (or a whole week). Lodging, gas and food on those days are totaled per week.</p>
+    ${weeks.map(ws => { const all = order.every((_, i) => S.work.days[addDays(ws, i)]); return `<div class="wk"><div class="row small"><span>${fmtShort(ws)} – ${fmtShort(addDays(ws, 6))}</span>
+      <button class="mini" data-act="toggleWorkWeek" data-ws="${ws}" style="flex:0 0 auto">${all ? 'Clear week' : 'Whole week'}</button></div>
+      <div class="chips">${order.map((dw, i) => { const d = addDays(ws, i), t = isWorkDay(d); return `<button class="chip ${t ? 'on ' + t : ''}" data-act="toggleWorkDay" data-date="${d}" title="${fmtDate(d)}">${DAYS[dw][0]}</button>`; }).join('')}</div></div>`; }).join('')}
+    ${ww.list.length ? `<div class="scroll"><table id="workTable"><thead><tr><th>Week of</th><th class="num">Lodging</th><th class="num">Gas</th><th class="num">Food</th><th class="num">Total</th></tr></thead><tbody>
+      ${ww.list.slice(0, 12).map(w => `<tr><td>${fmtShort(w.ws)} <span class="muted small">${w.days}d</span></td><td class="num">${money(w.lodging)}</td><td class="num">${money(w.gas)}</td><td class="num">${money(w.food)}</td><td class="num"><b>${money(w.total)}</b></td></tr>`).join('')}
+      </tbody></table></div><p class="small">Average per work week: <b id="workAvg">${money(ww.avg)}</b> (${ww.list.length} week${ww.list.length === 1 ? '' : 's'})</p>` : ''}
+    <details><summary class="small">Auto-tag work days</summary>
+      <label class="row" style="color:var(--text)"><input type="checkbox" data-aw="on" ${a.on ? 'checked' : ''} style="flex:0"><span>Auto-tag a day when it has spending in these categories on these weekdays</span></label>
+      <div class="chips">${DAYS.map((d, i) => `<label class="chip ${a.days.includes(i) ? 'on' : ''}"><input type="checkbox" data-aw="day" data-v="${i}" ${a.days.includes(i) ? 'checked' : ''} hidden>${d.slice(0, 3)}</label>`).join('')}</div>
+      <div class="chips">${S.categories.filter(c => !c.income).map(c => `<label class="chip ${a.cats.includes(c.id) ? 'on' : ''}"><input type="checkbox" data-aw="cat" data-v="${c.id}" ${a.cats.includes(c.id) ? 'checked' : ''} hidden>${h(c.name)}</label>`).join('')}</div>
+    </details></details></div>`;
+}
+function subsHTML() {
+  const subs = detectSubs(), keep = subs.filter(x => x.status !== 'cancel');
+  const cancel = subs.filter(x => x.status === 'cancel');
+  return `<div class="card" id="subsCard"><details data-keep="subsOpen" ${ui.subsOpen ? 'open' : ''}><summary><span style="font-size:1.05rem">Subscriptions &amp; recurring</span>
+    <span class="muted small">· ${money(sum(subs, x => x.monthly))}/mo</span></summary>
+    <p class="small muted">Found from repeating charges (same merchant, steady amount, weekly/monthly/yearly) plus your listed bills. Marking one doesn't cancel anything; it's a reminder list for you.</p>
+    <p class="small">Total <b>${money(sum(subs, x => x.monthly))}/mo</b> (${money(sum(subs, x => x.yearly))}/yr)${cancel.length ? ` · Planning to cancel <b class="good" id="cancelSave">${money(sum(cancel, x => x.yearly))}/yr</b>` : ''}</p>
+    <ul class="list" id="subsList">${subs.map(x => `<li data-key="${h(x.key)}"><div class="grow"><div class="t">${h(x.name)} <span class="tag">${x.source === 'bill' ? 'bill' : FREQS[x.cadence]?.toLowerCase()}</span>${x.status === 'cancel' ? ' <span class="tag bad">cancel</span>' : x.status === 'keep' ? ' <span class="tag">keep</span>' : ''}</div>
+      <div class="small muted">${money(x.monthly)}/mo · ${money(x.yearly)}/yr${x.last ? ' · last ' + fmtShort(x.last) : ''}</div></div>
+      <button class="mini" data-act="setSub" data-v="keep">Keep</button><button class="mini danger" data-act="setSub" data-v="cancel">Cancel</button></li>`).join('') || '<li class="muted small">Nothing recurring found yet. Needs at least 2 charges.</li>'}</ul>
+    </details></div>`;
+}
+function checkinsHTML() {
+  if (!S.checkins.length) return '';
+  return `<div class="card" id="checkinHist"><details><summary><span style="font-size:1.05rem">Weekly check-ins</span> <span class="muted small">· ${S.checkins.length}</span></summary>
+    ${S.checkins.map(c => `<details class="small"><summary style="font-weight:400">${fmtShort(c.ws)} – ${fmtShort(c.we)} · spent ${money(c.spent)}${c.budget ? ' of ' + money(c.budget) : ''}</summary>${checkinHTML(c, true)}</details>`).join('')}
+    </details></div>`;
+}
 function viewMore() {
   return `
+  ${goalsHTML()}${workHTML()}${subsHTML()}${checkinsHTML()}
   <div class="card"><h2>Categories &amp; budgets</h2>
     <p class="small muted">Leave budget blank for no limit. Weekly budgets reset on your week-start day.</p>
     <details ${ui.catsOpen ? 'open' : ''} data-keep="catsOpen"><summary>Edit ${S.categories.length} categories</summary>
@@ -777,6 +957,23 @@ const actions = {
   doImport, cancelImport: () => { ui.imp = null; $('#impArea').innerHTML = ''; $('#csvFile').value = ''; },
   export: () => download(`budget-backup-${today()}.json`, JSON.stringify({ app: 'budget-app', exported: new Date().toISOString(), data: { ...S, sync: { ...S.sync, passcode: '' } } }, null, 2), 'application/json'),
   ...actions_sync,
+  addGoal: () => { S.goals.push({ id: uid(), name: 'New goal', target: null, date: '', inSafe: true, contributions: [] }); save(); render(); },
+  delGoal: el => { const g = find(S.goals, el); if (confirm(`Delete goal "${g.name}"?`)) { S.goals = S.goals.filter(x => x !== g); save(); render(); } },
+  logContrib: el => { ui.goalLog = el.closest('[data-id]').dataset.id; render(); },
+  cancelContrib: () => { ui.goalLog = null; render(); },
+  saveContrib: el => {
+    const g = find(S.goals, el), tid = $('#gcTxn').value, t = tid && S.transactions.find(x => x.id === tid);
+    const amount = t ? t.amount : num($('#gcAmt').value), date = t ? t.date : ($('#gcDate').value || today());
+    if (!(amount > 0)) return toast('Enter an amount or pick a transfer.');
+    g.contributions.push({ id: uid(), date, amount: r2(amount), ...(t ? { txnId: t.id } : {}) });
+    ui.goalLog = null; save(); render(); toast(`Added ${money(amount)} to ${g.name}`);
+  },
+  delContrib: el => { const g = find(S.goals, el), cid = el.closest('[data-cid]').dataset.cid; g.contributions = g.contributions.filter(c => c.id !== cid); save(); render(); },
+  toggleWorkDay: el => { const d = el.dataset.date; if (S.work.days[d]) delete S.work.days[d]; else S.work.days[d] = true; save(); render(); },
+  toggleWorkWeek: el => { const ws = el.dataset.ws, ds = Array.from({ length: 7 }, (_, i) => addDays(ws, i)), all = ds.every(d => S.work.days[d]);
+    ds.forEach(d => { if (all) delete S.work.days[d]; else S.work.days[d] = true; }); save(); render(); },
+  dismissCheckin: el => { const c = weekSummary(el.dataset.ws); S.checkins.unshift({ ...c, dismissed: new Date().toISOString() }); S.checkins = S.checkins.slice(0, 104); save(); render(); },
+  setSub: el => { const k = el.closest('[data-key]').dataset.key, v = el.dataset.v; if (S.subStatus[k] === v) delete S.subStatus[k]; else S.subStatus[k] = v; save(); render(); },
   reset: () => { if (confirm('Erase ALL budget data on this device? Export a backup first!') && confirm('Really erase everything?')) { S = defaults(); save(); ui.imp = null; render(); toast('Reset done'); } }
 };
 document.addEventListener('click', e => {
@@ -790,16 +987,23 @@ document.addEventListener('change', async e => {
   if (el.id === 'fCat') { ui.txnCat = el.value; return render(); }
   if (el.id === 'csvFile') return onCsvFile(el.files[0]);
   if (el.id === 'restoreFile') return restore(el.files[0]);
+  if (el.dataset.aw) {
+    const a = S.settings.autoWork, v = el.dataset.v;
+    if (el.dataset.aw === 'on') a.on = el.checked;
+    else { const key = el.dataset.aw === 'day' ? 'days' : 'cats', val = el.dataset.aw === 'day' ? +v : v;
+      a[key] = el.checked ? [...new Set([...a[key], val])] : a[key].filter(x => x !== val); }
+    save(); return render();
+  }
   if (el.dataset.set) { S.settings[el.dataset.set] = el.dataset.set === 'weekStart' ? +el.value : el.value; save(); return render(); }
   if (el.dataset.map) { ui.imp.m[el.dataset.map] = el.type === 'checkbox' ? el.checked : ['date', 'desc', 'amount', 'debit', 'credit'].includes(el.dataset.map) ? +el.value : el.value;
     if (ui.imp.preview) buildPreview(); $('#impArea').innerHTML = importHTML(); return; }
   if (el.dataset.imp) { const x = ui.imp.preview.find(p => p.i === +el.closest('tr').dataset.i);
     if (el.dataset.imp === 'on') x.on = el.checked; else x.categoryId = el.value; $('#impArea').innerHTML = importHTML(); return; }
   if (el.dataset.edit) {
-    const coll = { alloc: S.allocations, bill: S.bills, debt: S.debts, cat: S.categories }[el.dataset.edit];
+    const coll = { alloc: S.allocations, bill: S.bills, debt: S.debts, cat: S.categories, goal: S.goals }[el.dataset.edit];
     const item = find(coll, el), f = el.dataset.f;
     let v = el.type === 'checkbox' ? el.checked : el.value;
-    if (['value', 'amount', 'balance', 'payment', 'budget', 'apr'].includes(f)) { v = num(v); if (v != null && v < 0) v = Math.abs(v); }
+    if (['value', 'amount', 'balance', 'payment', 'budget', 'apr', 'target'].includes(f)) { v = num(v); if (v != null && v < 0) v = Math.abs(v); }
     item[f] = v; save();
     if (el.tagName === 'SELECT' || el.type === 'checkbox' || el.type === 'date') render();
     else { ui.dirty = true; if ($('#planOut')) $('#planOut').innerHTML = planHTML(ui.planPay); }
@@ -836,4 +1040,4 @@ if (syncOn() && /[?&]oauth_state_id=/.test(location.search) && sessionStorage.ge
 } else if (syncOn() && S.sync.connected && navigator.onLine && (!S.sync.lastSync || Date.now() - Date.parse(S.sync.lastSync) > 6 * 3600e3)) {
   setTimeout(() => syncNow(true), 1500);
 }
-window.__budget = { get state() { return S; }, parseCSV, parseDate, autoCat, computePlan, debtStatus, applySync, applyCards, safeToSpend };
+window.__budget = { get state() { return S; }, goalStatus, workWeeks, weekSummary, dueCheckin, detectSubs, merchKey, parseCSV, parseDate, autoCat, computePlan, debtStatus, applySync, applyCards, safeToSpend };
