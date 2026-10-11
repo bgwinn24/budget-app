@@ -601,6 +601,7 @@ function viewSpend() {
     <div class="grid2"><select id="fMonth" aria-label="Month">${opts(months.map(m => [m, parseISO(m + '-01').toLocaleDateString('en-US', { month: 'long', year: 'numeric' })]), ui.txnMonth)}</select>
       <select id="fCat" aria-label="Category">${catOpts(ui.txnCat, 'All categories')}</select></div>
     <p class="small muted">Out: <b>${money(out)}</b> · In: <b>${money(inc)}</b> · ${list.length} item${list.length === 1 ? '' : 's'}</p>
+    ${(() => { const u = S.transactions.filter(t => t.plaidId && t.source === 'bank' && !t.resorted && isUncat(t)).length; return u ? `<button data-act="resort" id="resortBtn" style="margin-bottom:.5rem">Re-sort ${u} uncategorized</button>` : ''; })()}
     <ul class="list" id="txnList">${list.map(t => `<li data-id="${t.id}"><div class="grow"><div class="t">${h(t.note || catName(t.categoryId))}</div>
       <div class="small muted">${fmtShort(t.date)} · ${h(catName(t.categoryId))}${t.source === 'import' ? ' · imported' : t.source === 'bank' ? ' · bank' : ''}${t.pending ? ' <span class="tag">pending</span>' : ''}</div></div>
       <span class="amt ${t.type === 'income' ? 'good' : ''}">${t.type === 'income' ? '+' : ''}${money(t.amount)}</span>
@@ -799,6 +800,26 @@ function parseDate(s, fmt) {
   }
   const t = Date.parse(s); return isNaN(t) ? null : iso(new Date(t));
 }
+/* Plaid personal_finance_category -> app category (used only when no keyword rule matches). */
+function plaidCatId(primary, detailed, type) {
+  const by = re => S.categories.find(c => re.test(c.name))?.id;
+  const p = primary || '', d = detailed || '';
+  if (p === 'TRANSFER_IN' || p === 'TRANSFER_OUT' || d === 'LOAN_PAYMENTS_CREDIT_CARD_PAYMENT') return by(/transfer/i);   // card payments: avoid double counting
+  if (p === 'INCOME') return type === 'income' ? S.categories.find(c => c.income)?.id : null;
+  if (type === 'income') return null;
+  if (d === 'TRANSPORTATION_GAS') return by(/^gas/i);
+  if (d === 'TRAVEL_LODGING') return by(/hotel|lodg/i);
+  if (p === 'FOOD_AND_DRINK') return by(/food/i);
+  if (p === 'ENTERTAINMENT') return by(/fun|gaming|entertain/i);
+  if (p === 'RENT_AND_UTILITIES' || p === 'LOAN_PAYMENTS') return by(/bill/i);
+  if (p === 'GENERAL_MERCHANDISE') {
+    let c = S.categories.find(x => /shopping/i.test(x.name));
+    if (!c) { c = { id: uid(), name: 'Shopping', budget: null, period: 'week' }; S.categories.splice(Math.max(0, S.categories.findIndex(x => x.name === 'Other')), 0, c); }
+    return c.id;
+  }
+  return null;
+}
+const isUncat = t => !t.categoryId || !catById(t.categoryId) || catById(t.categoryId).name === 'Other' || (t.type === 'income' && !catById(t.categoryId).income && !/transfer/i.test(catById(t.categoryId).name));
 function autoCat(desc) {
   const d = ' ' + String(desc).toLowerCase();
   for (const r of S.rules) {
@@ -1061,14 +1082,15 @@ function applySync(r) {
     // 1) same Plaid id, or the posted version of a pending one we already have
     let t = S.transactions.find(x => x.plaidId === b.transaction_id)
       || (b.pending_transaction_id && S.transactions.find(x => x.plaidId === b.pending_transaction_id));
-    if (t) { Object.assign(t, { plaidId: b.transaction_id, date: b.date, amount, type, pending: !!b.pending }); if (t.source === 'bank') t.importDesc = desc; n.updated++; n.touched.push(t); continue; }
+    if (t) { Object.assign(t, { plaidId: b.transaction_id, date: b.date, amount, type, pending: !!b.pending }, b.category ? { plaidCat: b.category, plaidCatD: b.category_detailed || null } : {}); if (t.source === 'bank') t.importDesc = desc; n.updated++; n.touched.push(t); continue; }
     // 2) soft match against manual / CSV / debt entries: same direction, same amount, within 3 days (closest wins)
     const cand = S.transactions.filter(x => !x.plaidId && x.type === type && Math.abs(x.amount - amount) < 0.005 && Math.abs(dayDiff(x.date, b.date)) <= 3)
       .sort((x, y) => Math.abs(dayDiff(x.date, b.date)) - Math.abs(dayDiff(y.date, b.date)))[0];
     if (cand) { cand.plaidId = b.transaction_id; cand.pending = !!b.pending; n.matched++; n.touched.push(cand); continue; }
     // 3) new
     const nt = { id: uid(), date: b.date, amount, type, pending: !!b.pending,
-      categoryId: autoCat(`${desc} ${b.merchant_name || ''}`) || (/^(TRANSFER|LOAN_PAYMENTS)/.test(b.category || '') && transferCat) || (type === 'income' ? incomeCat : otherCat) || '',
+      categoryId: autoCat(`${desc} ${b.merchant_name || ''}`) || plaidCatId(b.category, b.category_detailed, type) || (/^(TRANSFER|LOAN_PAYMENTS)/.test(b.category || '') && transferCat) || (type === 'income' ? incomeCat : otherCat) || '',
+      ...(b.category ? { plaidCat: b.category, plaidCatD: b.category_detailed || null } : {}),
       note: b.merchant_name || desc, importDesc: desc, source: 'bank', plaidId: b.transaction_id, created: Date.now() + n.added };
     S.transactions.push(nt); n.touched.push(nt); n.added++;
   }
@@ -1088,6 +1110,19 @@ Object.assign(actions_sync, {
     catch (e) { toast(e.message); syncMsg(e.message); }
   },
   syncNow: () => syncNow(false),
+  resort: async () => {   // re-categorize only uncategorized bank transactions; keyword rules first, then Plaid's category
+    const bank = S.transactions.filter(t => t.plaidId && t.source === 'bank' && !t.resorted && isUncat(t));
+    if (!bank.length) return toast('Nothing to re-sort.');
+    if (bank.some(t => !t.plaidCat) && S.sync.connected) {   // older items: look up Plaid categories without touching the sync position
+      try { toast('Checking your bank categories…'); const map = new Map(); let cur = '';
+        for (let i = 0; i < 20; i++) { const r = await syncApi('sync', { cursor: cur }); [...r.added, ...r.modified].forEach(x => x.category && map.set(x.transaction_id, x)); cur = r.next_cursor; if (!r.has_more) break; }
+        bank.forEach(t => { const x = map.get(t.plaidId); if (x && !t.plaidCat) Object.assign(t, { plaidCat: x.category, plaidCatD: x.category_detailed || null }); });
+      } catch (e) { console.warn('resort lookup', e.message); }
+    }
+    let n = 0;
+    for (const t of bank) { const id = autoCat(`${t.importDesc || ''} ${t.note || ''}`) || plaidCatId(t.plaidCat, t.plaidCatD, t.type); if (id && id !== t.categoryId) { t.categoryId = id; n++; } else t.resorted = true; }
+    save(); render(); toast(n ? `Re-sorted ${n} transaction${n === 1 ? '' : 's'}.` : 'No better categories found.');
+  },
   syncInvite: () => { const c = $('#syInvite').value.trim(); if (!c) return toast('Enter your invite code.'); inviteLogin(c); },
   pwToggle: () => { ui.pwMode = ui.pwMode === 'signin' ? 'create' : 'signin'; render(); },
   signOut: async () => {
@@ -1297,4 +1332,4 @@ if (syncOn() && /[?&]oauth_state_id=/.test(location.search) && sessionStorage.ge
 } else if (syncOn() && S.sync.connected && navigator.onLine && (!S.sync.lastSync || Date.now() - Date.parse(S.sync.lastSync) > 6 * 3600e3)) {
   setTimeout(() => syncNow(true), 1500);
 }
-window.__budget = { get state() { return S; }, get cloud() { return cloud; }, goalStatus, workWeeks, weekSummary, dueCheckin, detectSubs, merchKey, parseCSV, parseDate, autoCat, computePlan, debtStatus, applySync, applyCards, safeToSpend };
+window.__budget = { plaidCatId, isUncat, get state() { return S; }, get cloud() { return cloud; }, goalStatus, workWeeks, weekSummary, dueCheckin, detectSubs, merchKey, parseCSV, parseDate, autoCat, computePlan, debtStatus, applySync, applyCards, safeToSpend };
