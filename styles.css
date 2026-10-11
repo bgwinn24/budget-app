@@ -93,3 +93,11 @@ section.adv h3{margin:0 0 .4rem;font-size:1rem}
 .card>details{border-top:0;padding-top:0}
 .updatebar{position:fixed;left:.75rem;right:.75rem;top:calc(3.2rem + env(safe-area-inset-top));z-index:20;background:var(--card);border:1px solid var(--accent);border-radius:12px;padding:.5rem .75rem;display:flex;align-items:center;justify-content:space-between;gap:.5rem;box-shadow:0 2px 8px rgba(0,0,0,.2)}
 .goal .row>.tag{flex:0 0 auto;white-space:nowrap} .goal-amt{margin-top:.1rem}
+:root[data-theme=matrix]{--bg:#000;--card:rgba(0,14,4,.84);--text:#00ff41;--muted:#3ccf62;--line:#0f4a1f;--accent:#00ff41;--accent-ink:#000;
+  --warn:#d4ff3a;--bad:#ff5c5c;--good:#00ff41;--bar:#0b2e14;--input:#000;--shadow:none;color-scheme:dark}
+:root[data-theme=matrix] body{font-family:ui-monospace,"Roboto Mono","DejaVu Sans Mono",monospace}
+:root[data-theme=matrix] .topbar{background:#000;color:var(--text);border-bottom:1px solid var(--accent)}
+:root[data-theme=matrix] .tabs{background:#000}
+:root[data-theme=matrix] .huge{text-shadow:0 0 10px rgba(0,255,65,.45)}
+#rain{position:fixed;inset:0;width:100%;height:100%;z-index:0;pointer-events:none;opacity:.22}
+:root[data-theme=matrix] main{position:relative;z-index:1}

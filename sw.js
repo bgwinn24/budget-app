@@ -1,7 +1,7 @@
 /* Offline cache for the app shell. Bump VERSION when any file changes.
    Strategy: network-first (revalidated, short timeout) so updates show up on the next open,
    falling back to the cache when offline. New workers activate immediately (skipWaiting + clients.claim). */
-const VERSION = 'budget-v2.3.0';
+const VERSION = 'budget-v2.4.0';
 const ASSETS = [
   './', './index.html', './styles.css', './app.js', './manifest.json',
   './icons/icon-192.png', './icons/icon-512.png', './icons/icon-maskable-512.png',

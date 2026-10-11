@@ -356,10 +356,30 @@ function safe(label, fn) {
     return `<div class="card alert warn section-error" data-section="${h(label)}"><b>${h(label)}</b> couldn't be shown (${h(e.message || 'error')}). The rest of the app still works; export a backup and report this.</div>`;
   }
 }
+/* Matrix theme: faint falling-characters canvas behind the cards. ~24 fps, paused when hidden, one still frame with reduced motion. */
+const rain = { on: false };
+function matrixRain(on) {
+  if (on === rain.on) return; rain.on = on;
+  if (!on) { cancelAnimationFrame(rain.raf); rain.c?.remove(); rain.c = null; return; }
+  const c = rain.c = document.createElement('canvas'), x = c.getContext('2d'), FS = 16, CH = '0123456789$¥アイウエオカキクケコサシスセソタチツテト';
+  c.id = 'rain'; c.setAttribute('aria-hidden', 'true'); document.body.prepend(c);
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)'); let W, H, drops, last = 0;
+  const step = () => { x.fillStyle = 'rgba(0,0,0,.09)'; x.fillRect(0, 0, W, H); x.font = FS + 'px monospace';
+    drops.forEach((d, i) => { x.fillStyle = Math.random() < 0.06 ? '#d6ffe0' : '#00ff41'; x.fillText(CH[(Math.random() * CH.length) | 0], i * FS, d * FS);
+      drops[i] = d * FS > H && Math.random() > 0.97 ? -Math.random() * 10 : d + 1; }); };
+  const loop = t => { rain.raf = requestAnimationFrame(loop); if (t - last >= 42 && !document.hidden) { last = t; step(); } };
+  const start = () => { if (rain.c !== c) return; cancelAnimationFrame(rain.raf); const r = devicePixelRatio || 1; W = innerWidth; H = innerHeight;
+    c.width = W * r; c.height = H * r; x.setTransform(r, 0, 0, r, 0, 0); x.fillStyle = '#000'; x.fillRect(0, 0, W, H);
+    drops = Array.from({ length: Math.ceil(W / FS) }, () => -Math.random() * H / FS);
+    if (reduce.matches) for (let k = 0; k < 120; k++) step(); else rain.raf = requestAnimationFrame(loop); };
+  if (!rain.wired) { rain.wired = true; addEventListener('resize', () => rain.c && rain.start()); reduce.addEventListener?.('change', () => rain.c && rain.start()); }
+  rain.start = start; start();
+}
 function render() {
   $$('.tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   document.documentElement.dataset.theme = S.settings.theme === 'auto' ? '' : S.settings.theme;
   if (S.settings.theme === 'auto') delete document.documentElement.dataset.theme;
+  matrixRain(S.settings.theme === 'matrix');
   const views = { home: viewHome, plan: viewPlan, spend: viewSpend, debts: viewDebts, more: viewMore };
   $('#view').innerHTML = safe({ home: 'Home', plan: 'Paycheck', spend: 'Spending', debts: 'Debts', more: 'More' }[tab], views[tab]);
   $('#title').textContent = { home: 'Budget', plan: 'Paycheck plan', spend: 'Spending', debts: 'Debts', more: 'More' }[tab];
@@ -625,7 +645,7 @@ function moreCoreHTML() {
     <button data-act="addCat" style="margin-top:.6rem">+ Add category</button></details></div>
   <div class="card"><h2>Settings</h2>
     <div class="grid2"><div><label for="sWeek">Week starts on</label><select id="sWeek" data-set="weekStart">${opts(['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].map((d, i) => [i, d]), S.settings.weekStart)}</select></div>
-      <div><label for="sTheme">Theme</label><select id="sTheme" data-set="theme">${opts([['auto', 'Match phone'], ['light', 'Light'], ['dark', 'Dark']], S.settings.theme)}</select></div></div>
+      <div><label for="sTheme">Theme</label><select id="sTheme" data-set="theme">${opts([['auto', 'Match phone'], ['light', 'Light'], ['dark', 'Dark'], ['matrix', 'Matrix']], S.settings.theme)}</select></div></div>
     <div class="grid2"><div><label for="sCdName">Countdown event name (optional)</label><input id="sCdName" data-set="countdownName" placeholder="e.g. Vacation" value="${h(S.settings.countdownName || '')}"></div>
       <div><label for="sCdDate">Countdown date (optional)</label><input id="sCdDate" type="date" data-set="countdownDate" value="${h(S.settings.countdownDate || '')}"></div></div>
     <p class="small muted">v2.1 · ${S.transactions.length} transactions stored on this device.</p></div>`;
