@@ -102,6 +102,19 @@ function migrate() {   // upgrade older saved data / backups in place
   // v2.2: goals, work days, check-ins, subscription marks
   if (!Array.isArray(S.goals)) S.goals = [];
   S.goals.forEach(g => { if (!Array.isArray(g.contributions)) g.contributions = []; if (g.inSafe === undefined) g.inSafe = true; });
+  if (!S.settings.migrated23) {   // v2.3: goals count only explicit money; drop anything else, keep his logged contributions
+    const seen = new Set();
+    S.goals.forEach(g => {
+      g.contributions = g.contributions.filter(c => c && +c.amount > 0 && /^\d{4}-\d\d-\d\d$/.test(c.date || '') && !(c.txnId && seen.has(c.txnId)))
+        .map(c => { if (c.txnId) seen.add(c.txnId); return { id: c.id || uid(), date: c.date, amount: r2(+c.amount), ...(c.txnId ? { txnId: c.txnId } : {}), ...(c.note ? { note: String(c.note) } : {}) }; });
+      for (const k of ['saved', 'progress', 'current', 'auto', 'autoCount', 'linkedCats', 'categoryId']) delete g[k];
+      if (!g.startDate) g.startDate = g.contributions.map(c => c.date).sort()[0] || today();
+      // a single typed contribution equal to the target usually means the goal amount was entered as money saved: ask him
+      if (g.target > 0 && sum(g.contributions, c => c.amount) + (+g.startAmount > 0 ? +g.startAmount : 0) >= g.target && g.contributions.some(c => !c.txnId && Math.abs(c.amount - g.target) < 0.005)) g.review = true;
+    });
+    S.settings.migrated23 = true;
+  }
+  S.goals.forEach(g => { if (!(g.target > 0)) g.target = null; if (!(g.startAmount > 0)) g.startAmount = 0; if (!g.startDate) g.startDate = today(); if (typeof g.name !== 'string') g.name = ''; });
   if (!S.work || typeof S.work.days !== 'object') S.work = { days: {} };
   if (!Array.isArray(S.checkins)) S.checkins = [];
   if (!S.subStatus || typeof S.subStatus !== 'object') S.subStatus = {};
@@ -208,14 +221,36 @@ function autoPaychecks(txns) {
 const payToast = made => made.length ? ` · Paycheck added: ${made.map(p => money(p.amount)).join(', ')}` : '';
 
 /* ---------- goals ---------- */
-function goalStatus(g) {
-  const saved = r2(sum(g.contributions || [], c => c.amount));
-  const target = g.target > 0 ? g.target : null;
+// Only money explicitly logged counts: the optional starting amount + contributions he adds (typed, or a transaction he links).
+// Allocations, transfers and synced transactions never count on their own.
+function goalStatus(g, on = today()) {
+  const contributed = r2(sum((g.contributions || []).filter(c => c.amount > 0), c => +c.amount));
+  const start = g.startAmount > 0 ? r2(+g.startAmount) : 0;
+  const saved = r2(start + contributed);
+  const target = g.target > 0 ? r2(+g.target) : null;
+  const done = !!target && saved >= target;   // reached only when saved >= target > 0
   const left = target ? Math.max(0, r2(target - saved)) : null;
-  const days = g.date ? dayDiff(g.date, today()) : null;
-  const weeks = days == null ? null : Math.max(1, Math.ceil((days + 1) / 7));
-  const weekly = left && weeks ? r2(left / weeks) : 0;
-  return { saved, target, left, days, weeks, weekly, pct: target ? Math.min(100, saved / target * 100) : 0, done: !!target && saved >= target };
+  const days = g.date ? dayDiff(g.date, on) : null;
+  const past = days != null && days < 0 && !done;
+  const weeks = days == null || days < 0 ? null : Math.max(1, Math.ceil((days + 1) / 7));
+  const weekly = target && !done && weeks ? r2(left / weeks) : 0;
+  let expected = null, behind = 0;   // where he should be by now: straight line from (start date, starting amount) to (target date, target)
+  if (target && g.date && !done) {
+    const s0 = g.startDate && g.startDate < g.date ? g.startDate : on, total = dayDiff(g.date, s0), el = dayDiff(on, s0);
+    const f = total <= 0 ? 1 : Math.min(1, Math.max(0, el / total));
+    expected = r2(Math.min(target, start + (target - start) * f)); behind = Math.max(0, r2(expected - saved));
+  }
+  return { saved, start, contributed, target, left, days, weeks, weekly, past, done, expected, behind, onTrack: expected != null && behind < 0.01,
+    pct: target ? Math.min(100, saved / target * 100) : 0, noTarget: !target };
+}
+const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+function goalLines(gs) {   // [main line, class, track line, track class]
+  if (gs.noTarget) return ['Set a target amount to track this goal.', 'muted', '', ''];
+  if (gs.done) return ['Reached! 🎉', 'good', '', ''];
+  if (gs.past) return [`Past date · ${money(gs.left)} left`, 'bad', '', ''];
+  const main = `${money(gs.left)} left` + (gs.weeks ? ` · ${plural(gs.weeks, 'week')} left · <b>${money(gs.weekly)}/week</b> needed` : ' · add a target date to see the weekly amount');
+  if (gs.expected == null) return [main, 'muted', '', ''];
+  return [main, 'muted', gs.behind > 0 ? `Behind by ${money(gs.behind)} (should have ${money(gs.expected)} by now)` : 'On track ✓', gs.behind > 0 ? 'warn' : 'good'];
 }
 /* ---------- work weeks ---------- */
 const catIdsBy = re => S.categories.filter(c => re.test(c.name)).map(c => c.id);
@@ -361,10 +396,10 @@ function viewHome() {
   ${overs.map(o => `<div class="alert">⚠ <b>${h(o.c.name)}</b> is over budget by ${money(o.s - o.c.budget)} ${o.c.period === 'month' ? 'this month' : 'this week'}.</div>`).join('')}
   ${days != null && days >= 0 ? `<div class="card compact"><b>${h(wn)}</b> · ${fmtDate(wd)} — ${days === 0 ? 'today! 🎉' : `${days} day${days === 1 ? '' : 's'} to go`}</div>` : ''}
   ${rows.length ? `<div class="card compact"><h2>Budgets</h2>${budgetHTML(rows)}</div>` : ''}
-  ${safe('Goals', () => S.goals.length ? `<div class="card compact" id="homeGoals"><h2>Goals</h2>${S.goals.map(g => { const gs = goalStatus(g); return `<div class="budget">
-    <div class="head"><span>${h(g.name)}${g.date ? ` <span class="tag">${gs.days < 0 ? 'past due' : fmtShort(g.date)}</span>` : ''}</span><span class="amt">${money(gs.saved)}${gs.target ? ' / ' + money(gs.target) : ''}</span></div>
-    ${gs.target ? `<div class="bar"><i style="width:${gs.pct.toFixed(1)}%"></i></div>` : ''}
-    <div class="small muted">${gs.done ? 'Reached! 🎉' : gs.weekly ? `${money(gs.weekly)}/week needed` : gs.target ? 'Add a target date to see the weekly amount' : 'Add a target amount to see the weekly amount'}</div></div>`; }).join('')}</div>` : '')}
+  ${safe('Goals', () => S.goals.length ? `<div class="card compact" id="homeGoals"><h2>Goals</h2>${S.goals.map(g => { const gs = goalStatus(g), [m, mc, t, tc] = goalLines(gs); return `<div class="budget" data-goal="${g.id}">
+    <div class="head"><span>${h(g.name || 'Untitled goal')}${g.date ? ` <span class="tag">${gs.past ? 'past date' : fmtShort(g.date)}</span>` : ''}</span><span class="amt">${money(gs.saved)}${gs.target ? ' / ' + money(gs.target) : ''}</span></div>
+    ${gs.target ? `<div class="bar${gs.past ? ' over' : gs.behind > 0 ? ' warn' : ''}"><i style="width:${gs.pct.toFixed(1)}%"></i></div>` : ''}
+    <div class="small ${mc}">${gs.noTarget ? 'Set a target in More → Savings goals' : gs.done || gs.past ? m : gs.weekly ? `${money(gs.weekly)}/week needed` : m}${t ? ` · <span class="${tc}">${gs.behind > 0 ? `behind by ${money(gs.behind)}` : 'on track'}</span>` : ''}</div></div>`; }).join('')}</div>` : '')}
   ${S.debts.length ? `<div class="card compact"><h2>Debts <span class="muted small">· ${money(debtLeft)} left</span></h2><ul class="list">${S.debts.map(d => { const ds = debtStatus(d); return `<li><div class="grow"><div class="t">${h(d.name)}${d.bank ? ' <span class="tag">bank</span>' : ''}</div>
       <div class="small muted">${d.bank && d.dueDate ? `Due ${fmtShort(d.dueDate)}${d.payment ? ' · min ' + money(d.payment) : ''}` : ds.projected ? 'Payoff ~' + fmtDate(ds.projected) : 'Enter balance & payment'}${ds.behind ? ' <span class="tag bad">past end date</span>' : ''}</div></div>
       <span class="amt">${money(ds.remaining)}</span></li>`; }).join('')}</ul></div>` : ''}`;
@@ -504,23 +539,35 @@ function goalsHTML() {
   const txOpts = S.transactions.filter(t => { const c = catById(t.categoryId); return c && /transfer|saving/i.test(c.name) && t.date >= addDays(today(), -60)
     && !S.goals.some(g => g.contributions.some(x => x.txnId === t.id)); }).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 25);
   return `<div class="card" id="goalsCard"><h2>Savings goals</h2>
-    ${S.goals.map(g => { const gs = goalStatus(g); return `<div class="editor-row goal" data-id="${g.id}">
-      <div class="full row"><b style="flex:1">${h(g.name)}</b><span class="amt">${money(gs.saved)}${gs.target ? ' / ' + money(gs.target) : ''}</span></div>
-      ${gs.target ? `<div class="full bar"><i style="width:${gs.pct.toFixed(1)}%"></i></div>` : ''}
-      <div class="full small ${gs.done ? 'good' : 'muted'}">${gs.done ? 'Reached! 🎉' : gs.weekly ? `<b>${money(gs.weekly)}/week</b> for ${gs.weeks} more week${gs.weeks === 1 ? '' : 's'} (${money(gs.left)} to go)` : gs.target ? 'Set a target date to see the weekly amount.' : 'Set a target amount to see the weekly amount.'}</div>
-      <div class="full row"><button class="mini primary" data-act="logContrib">+ Add to goal</button></div>
-      ${ui.goalLog === g.id ? `<div class="full"><div class="grid2"><div><label>Amount</label><input id="gcAmt" inputmode="decimal" placeholder="0.00"></div>
+    <p class="small muted">Only money you log counts toward a goal: a starting amount, money you add here, or a transfer you pick. Nothing is counted automatically.</p>
+    ${S.goals.map(g => { const gs = goalStatus(g), [m, mc, t, tc] = goalLines(gs), editing = ui.goalEdit === g.id;
+      const hist = [...g.contributions].sort((a, b) => b.date.localeCompare(a.date));
+      return `<div class="editor-row goal" data-id="${g.id}">
+      <div class="full row"><b style="flex:1">${h(g.name || 'Untitled goal')}</b>${g.date ? `<span class="tag ${gs.past ? 'bad' : ''}">${gs.past ? 'past date · ' : 'by '}${fmtShort(g.date)}</span>` : ''}</div>
+      <div class="full goal-amt"><span class="amt" style="font-size:1.25rem">${money(gs.saved)}</span>${gs.target ? ` <span class="muted">of ${money(gs.target)} · ${Math.floor(gs.pct)}%</span>` : ' <span class="muted">saved</span>'}</div>
+      ${gs.target ? `<div class="full bar${gs.past ? ' over' : gs.behind > 0 ? ' warn' : ''}"><i style="width:${gs.pct.toFixed(1)}%"></i></div>` : ''}
+      <div class="full small ${mc} goal-status">${m}</div>
+      ${t ? `<div class="full small ${tc} goal-track">${t}</div>` : ''}
+      ${g.review ? `<div class="full alert warn small goal-review">You logged ${money(g.target)} as saved, the same as the target. If you meant that as the goal amount (not money already saved), remove it.
+        <div class="row" style="margin-top:.3rem"><button class="mini primary" data-act="reviewRemove">Remove it</button><button class="mini" data-act="reviewKeep">It's real money saved</button></div></div>` : ''}
+      <div class="full row"><button class="mini primary" data-act="logContrib">+ Add money saved</button>${gs.noTarget ? '<button class="mini" data-act="editGoal" data-focus="target">Set a target</button>' : ''}<button class="mini" data-act="editGoal">${editing ? 'Close edit' : 'Edit'}</button></div>
+      ${ui.goalLog === g.id ? `<div class="full goal-log"><div class="grid2"><div><label>Amount saved</label><input id="gcAmt" inputmode="decimal" placeholder="0.00"></div>
         <div><label>Date</label><input id="gcDate" type="date" value="${today()}"></div></div>
-        <label>…or use a transfer you already recorded</label><select id="gcTxn"><option value="">— none —</option>${txOpts.map(t => `<option value="${t.id}">${fmtShort(t.date)} · ${h(t.note || catName(t.categoryId))} · ${money(t.amount)}</option>`).join('')}</select>
+        <label>Note (optional)</label><input id="gcNote" placeholder="e.g. moved to savings">
+        <label>…or link a transfer you already recorded (optional)</label><select id="gcTxn"><option value="">— none —</option>${txOpts.map(t => `<option value="${t.id}">${fmtShort(t.date)} · ${h(t.note || catName(t.categoryId))} · ${money(t.amount)}</option>`).join('')}</select>
         <div class="row" style="margin-top:.4rem"><button class="primary" data-act="saveContrib">Save</button><button data-act="cancelContrib">Cancel</button></div></div>` : ''}
-      <details class="full"><summary class="small">Edit goal · ${g.contributions.length} contribution${g.contributions.length === 1 ? '' : 's'}</summary>
-        <div class="grid2"><div class="full" style="grid-column:1/-1"><label>Name</label><input data-edit="goal" data-f="name" value="${h(g.name)}"></div>
-        <div><label>Target amount</label><input data-edit="goal" data-f="target" inputmode="decimal" placeholder="0.00" value="${g.target ?? ''}"></div>
-        <div><label>Target date</label><input type="date" data-edit="goal" data-f="date" value="${h(g.date || '')}"></div></div>
+      ${editing ? `<div class="full goal-edit"><div class="grid2"><div class="full" style="grid-column:1/-1"><label>Name</label><input data-edit="goal" data-f="name" value="${h(g.name)}" placeholder="e.g. Vacation"></div>
+        <div><label>Target amount</label><input data-edit="goal" data-f="target" inputmode="decimal" placeholder="e.g. 3000" value="${g.target ?? ''}"></div>
+        <div><label>Target date</label><input type="date" data-edit="goal" data-f="date" value="${h(g.date || '')}"></div>
+        <div><label>Starting amount already saved</label><input data-edit="goal" data-f="startAmount" inputmode="decimal" placeholder="0.00" value="${g.startAmount || ''}"></div>
+        <div><label>Started saving on</label><input type="date" data-edit="goal" data-f="startDate" value="${h(g.startDate || '')}"></div></div>
         <label class="row" style="color:var(--text)"><input type="checkbox" data-edit="goal" data-f="inSafe" ${g.inSafe ? 'checked' : ''} style="flex:0"><span>Set aside the weekly amount in Safe to spend</span></label>
-        <ul class="list">${[...g.contributions].sort((a, b) => b.date.localeCompare(a.date)).map(c => `<li data-cid="${c.id}"><div class="grow small">${fmtDate(c.date)}${c.txnId ? ' <span class="tag">transfer</span>' : ''}</div>
-          <span class="amt">${money(c.amount)}</span><button class="mini danger" data-act="delContrib">✕</button></li>`).join('')}</ul>
-        <button class="mini danger" data-act="delGoal">Delete goal</button></details></div>`; }).join('') || '<p class="muted small">No goals yet.</p>'}
+        <div class="row" style="margin-top:.4rem"><button class="primary" data-act="editGoal">Done</button><button class="danger" data-act="delGoal">Delete goal</button></div></div>` : ''}
+      <details class="full goal-hist" ${ui.goalHist === g.id ? 'open' : ''}><summary class="small">History · ${plural(g.contributions.length, 'contribution')}</summary>
+        <ul class="list">${hist.map(c => `<li data-cid="${c.id}"><div class="grow small">${fmtDate(c.date)}${c.txnId ? ' <span class="tag">transfer</span>' : ''}${c.note ? ` · ${h(c.note)}` : ''}</div>
+          <span class="amt">${money(c.amount)}</span><button class="mini danger" data-act="delContrib" aria-label="Remove">✕</button></li>`).join('')}
+          ${gs.start ? `<li><div class="grow small muted">Starting amount${g.startDate ? ' · ' + fmtDate(g.startDate) : ''}</div><span class="amt">${money(gs.start)}</span></li>` : ''}
+          ${!hist.length && !gs.start ? '<li class="small muted">Nothing logged yet.</li>' : ''}</ul></details></div>`; }).join('') || '<p class="muted small">No goals yet.</p>'}
     <button data-act="addGoal" style="margin-top:.6rem">+ Add goal</button></div>`;
 }
 function workHTML() {
@@ -972,18 +1019,28 @@ const actions = {
   doImport, cancelImport: () => { ui.imp = null; $('#impArea').innerHTML = ''; $('#csvFile').value = ''; },
   export: () => download(`budget-backup-${today()}.json`, JSON.stringify({ app: 'budget-app', exported: new Date().toISOString(), data: { ...S, sync: { ...S.sync, passcode: '' } } }, null, 2), 'application/json'),
   ...actions_sync,
-  addGoal: () => { S.goals.push({ id: uid(), name: 'New goal', target: null, date: '', inSafe: true, contributions: [] }); save(); render(); },
-  delGoal: el => { const g = find(S.goals, el); if (confirm(`Delete goal "${g.name}"?`)) { S.goals = S.goals.filter(x => x !== g); save(); render(); } },
-  logContrib: el => { ui.goalLog = el.closest('[data-id]').dataset.id; render(); },
+  addGoal: () => { const g = { id: uid(), name: 'New goal', target: null, date: '', startAmount: 0, startDate: today(), inSafe: true, contributions: [] };
+    S.goals.push(g); ui.goalEdit = g.id; save(); render(); $(`.goal[data-id="${g.id}"] [data-f=name]`)?.select(); },
+  editGoal: el => { const id = el.closest('[data-id]').dataset.id, f = el.dataset.focus; ui.goalEdit = ui.goalEdit === id && !f ? null : id; ui.goalLog = null; render();
+    if (f) $(`.goal[data-id="${id}"] [data-f=${f}]`)?.focus(); },
+  delGoal: el => { const g = find(S.goals, el); if (confirm(`Delete goal "${g.name || 'Untitled goal'}" and its history?`)) { S.goals = S.goals.filter(x => x !== g); ui.goalEdit = null; save(); render(); } },
+  logContrib: el => { ui.goalLog = el.closest('[data-id]').dataset.id; ui.goalEdit = null; render(); $('#gcAmt')?.focus(); },
   cancelContrib: () => { ui.goalLog = null; render(); },
   saveContrib: el => {
-    const g = find(S.goals, el), tid = $('#gcTxn').value, t = tid && S.transactions.find(x => x.id === tid);
-    const amount = t ? t.amount : num($('#gcAmt').value), date = t ? t.date : ($('#gcDate').value || today());
+    const g = find(S.goals, el), tid = $('#gcTxn').value, t = tid && S.transactions.find(x => x.id === tid), typed = num($('#gcAmt').value);
+    const amount = typed > 0 ? typed : t ? t.amount : typed, date = t && !(typed > 0) ? t.date : ($('#gcDate').value || today()), note = $('#gcNote').value.trim();
     if (!(amount > 0)) return toast('Enter an amount or pick a transfer.');
-    g.contributions.push({ id: uid(), date, amount: r2(amount), ...(t ? { txnId: t.id } : {}) });
-    ui.goalLog = null; save(); render(); toast(`Added ${money(amount)} to ${g.name}`);
+    const cur = goalStatus(g);   // guard the old mix-up: typing the goal amount here instead of under Edit
+    if (cur.saved === 0 && g.target > 0 && amount >= g.target && !confirm(`Log ${money(amount)} as money already saved? That marks "${g.name || 'this goal'}" as reached. (To change the goal amount, use Edit.)`)) return;
+    g.contributions.push({ id: uid(), date, amount: r2(amount), ...(t ? { txnId: t.id } : {}), ...(note ? { note } : {}) });
+    ui.goalLog = null; ui.goalHist = g.id; save(); render(); toast(`Added ${money(amount)} to ${g.name || 'goal'}`);
   },
-  delContrib: el => { const g = find(S.goals, el), cid = el.closest('[data-cid]').dataset.cid; g.contributions = g.contributions.filter(c => c.id !== cid); save(); render(); },
+  delContrib: el => { const g = find(S.goals, el), cid = el.closest('[data-cid]').dataset.cid, c = g.contributions.find(x => x.id === cid);
+    if (!confirm(`Remove ${money(c.amount)} (${fmtDate(c.date)}) from ${g.name || 'this goal'}?`)) return;
+    g.contributions = g.contributions.filter(x => x !== c); ui.goalHist = g.id; save(); render(); },
+  reviewRemove: el => { const g = find(S.goals, el), i = g.contributions.findIndex(c => !c.txnId && Math.abs(c.amount - g.target) < 0.005);
+    if (i >= 0) g.contributions.splice(i, 1); delete g.review; save(); render(); toast('Removed. Log real savings with “+ Add money saved”.'); },
+  reviewKeep: el => { delete find(S.goals, el).review; save(); render(); },
   toggleWorkDay: el => { const d = el.dataset.date; if (S.work.days[d]) delete S.work.days[d]; else S.work.days[d] = true; save(); render(); },
   toggleWorkWeek: el => { const ws = el.dataset.ws, ds = Array.from({ length: 7 }, (_, i) => addDays(ws, i)), all = ds.every(d => S.work.days[d]);
     ds.forEach(d => { if (all) delete S.work.days[d]; else S.work.days[d] = true; }); save(); render(); },
@@ -1018,6 +1075,11 @@ document.addEventListener('change', async e => {
     const coll = { alloc: S.allocations, bill: S.bills, debt: S.debts, cat: S.categories, goal: S.goals }[el.dataset.edit];
     const item = find(coll, el), f = el.dataset.f;
     let v = el.type === 'checkbox' ? el.checked : el.value;
+    if (el.dataset.edit === 'goal' && ['target', 'startAmount'].includes(f)) {   // strict: "3k" must not silently become 3
+      const t = String(v).trim();
+      if (t && !/^\$?\s*(\d{1,3}(,\d{3})+|\d*)(\.\d*)?$/.test(t)) { toast('Enter a plain number, e.g. 3000'); el.value = item[f] || ''; return; }
+      v = num(t); item[f] = f === 'startAmount' ? (v > 0 ? r2(v) : 0) : (v > 0 ? r2(v) : null); delete item.review; save(); return render();
+    }
     if (['value', 'amount', 'balance', 'payment', 'budget', 'apr', 'target'].includes(f)) { v = num(v); if (v != null && v < 0) v = Math.abs(v); }
     item[f] = v; save();
     if (el.tagName === 'SELECT' || el.type === 'checkbox' || el.type === 'date') render();
@@ -1025,7 +1087,8 @@ document.addEventListener('change', async e => {
   }
 });
 // Re-render after text edits only once focus leaves the form fields, so tapping the next field on a phone isn't interrupted.
-document.addEventListener('toggle', e => { const k = e.target.dataset?.keep; if (k) ui[k] = e.target.open; }, true);
+document.addEventListener('toggle', e => { const k = e.target.dataset?.keep; if (k) ui[k] = e.target.open;
+  if (e.target.classList?.contains('goal-hist')) { const id = e.target.closest('[data-id]').dataset.id; if (e.target.open) ui.goalHist = id; else if (ui.goalHist === id) ui.goalHist = null; } }, true);
 document.addEventListener('focusout', () => setTimeout(() => {
   if (ui.dirty && !document.activeElement?.matches('#view input, #view select')) { ui.dirty = false; render(); }
 }, 0));
