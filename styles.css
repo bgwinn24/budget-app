@@ -117,3 +117,4 @@ section.adv h3{margin:0 0 .4rem;font-size:1rem}
 @keyframes bgdrift{from{transform:translate3d(-6%,-4%,0) rotate(-2deg)}to{transform:translate3d(6%,4%,0) rotate(2deg)}}
 @media (prefers-reduced-motion:reduce){#bgfx{animation:none}}
 .topbar h1{text-align:center} .topbar #offline{position:absolute;right:1rem}
+body.gated .tabs{display:none}

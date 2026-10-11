@@ -1,4 +1,4 @@
-/* Budget — v1. Vanilla JS, all data in localStorage on this device. */
+/* Budget. Vanilla JS; data cached in localStorage and saved (encrypted) to the signed-in account via the Worker. */
 'use strict';
 
 /* ---------- helpers ---------- */
@@ -86,11 +86,9 @@ function defaults() {
   };
 }
 const blankSync = () => ({ url: '', passcode: '', session: '', label: '', key: '', cursor: '', connected: false, institution: null, lastSync: null, accounts: [] });
+const normalize = s => { const d = defaults(); return { ...d, ...s, settings: { ...d.settings, ...(s.settings || {}) }, sync: { ...blankSync(), ...(s.sync || {}) } }; };
 function load() {
-  try {
-    const raw = localStorage.getItem(KEY);
-    if (raw) { const d = defaults(), s = JSON.parse(raw); return { ...d, ...s, settings: { ...d.settings, ...(s.settings || {}) }, sync: { ...blankSync(), ...(s.sync || {}) } }; }
-  } catch (e) { console.error(e); }
+  try { const raw = localStorage.getItem(KEY); if (raw) return normalize(JSON.parse(raw)); } catch (e) { console.error(e); }
   return defaults();
 }
 function migrate() {   // upgrade older saved data / backups in place
@@ -121,9 +119,74 @@ function migrate() {   // upgrade older saved data / backups in place
   if (!S.settings.autoWork) S.settings.autoWork = { on: false, days: [1, 2, 3, 4, 5], cats: S.categories.filter(c => /lodg|hotel/i.test(c.name)).map(c => c.id) };
 }
 let S = load(); migrate();
-function save() {
+function save(local) {
   try { localStorage.setItem(KEY, JSON.stringify(S)); }
   catch (e) { alert('Could not save — device storage may be full. Export a backup now.'); }
+  if (!local && S.sync.session && cloud.user) { cloud.dirty++; saveCloud(); clearTimeout(pushTimer); pushTimer = setTimeout(cloudPush, 2000); }
+}
+/* ---------- account + cloud copy (one encrypted document per user on the Worker; last write wins by revision) ---------- */
+const CLOUD = 'budgetApp.cloud', COPY = 'budgetApp.localCopy', DEVICE = ['session', 'label', 'passcode', 'key', 'url'];
+let cloud = { user: '', rev: 0, dirty: 0, ...JSON.parse(localStorage.getItem(CLOUD) || '{}') }, pushTimer, pushing = false;
+const saveCloud = () => localStorage.setItem(CLOUD, JSON.stringify(cloud));
+const docOut = () => { const d = JSON.parse(JSON.stringify(S)); DEVICE.forEach(k => d.sync[k] = ''); return d; };
+const hasData = x => ['transactions', 'paychecks', 'bills', 'debts', 'goals', 'checkins'].some(k => x?.[k]?.length);
+function adopt(data, rev) {   // replace local data with the account's copy, keeping this device's login fields
+  const dev = Object.fromEntries(DEVICE.map(k => [k, S.sync[k]]));
+  S = normalize(data); Object.assign(S.sync, dev); migrate(); cloud.rev = rev; cloud.dirty = 0; saveCloud(); save(true);
+}
+function keepLocalCopy() { localStorage.setItem(COPY, JSON.stringify({ at: new Date().toISOString(), data: docOut() })); }
+async function cloudApi(method, body) {
+  const r = await fetch(SYNC_URL_DEFAULT + '/data', { method, headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + S.sync.session }, ...(body ? { body: JSON.stringify(body) } : {}) });
+  const d = await r.json().catch(() => ({}));
+  if (d.code === 'SESSION_EXPIRED') { S.sync.session = ''; save(true); render(); }
+  if (!r.ok && r.status !== 409) throw Object.assign(new Error(d.error || 'Could not save to your account'), { code: d.code });
+  return d;
+}
+function serverWins(d) {   // server is newer than our unsynced edits: keep server, stash ours as a restorable copy
+  keepLocalCopy(); adopt(d.data, d.rev); render();
+  toast('Newer data came from another device. Your copy from this device is saved under More → Account.');
+}
+async function cloudPush() {
+  if (pushing || !cloud.dirty || !S.sync.session || !cloud.user || !navigator.onLine) return;
+  pushing = true; const n = cloud.dirty;
+  try {
+    const d = await cloudApi('PUT', { rev: cloud.rev, data: docOut() });
+    if (d.code === 'REV_CONFLICT') serverWins(d);
+    else { cloud.rev = d.rev; cloud.dirty = Math.max(0, cloud.dirty - n); cloud.saved = new Date().toISOString(); saveCloud(); }
+  } catch (e) { console.warn('cloud push', e.message); }
+  finally { pushing = false; if (cloud.dirty && navigator.onLine) { clearTimeout(pushTimer); pushTimer = setTimeout(cloudPush, 2000); } }
+}
+async function cloudSync() {   // on open / foreground / back online: pull, then push our edits
+  if (!S.sync.session || !cloud.user || !navigator.onLine) return;
+  try {
+    await linkLegacyBank();
+    const d = await cloudApi('GET');
+    if (d.rev > cloud.rev) { if (cloud.dirty) serverWins(d); else { adopt(d.data, d.rev); render(); } }
+    else if (d.rev < cloud.rev) { cloud.rev = d.rev; cloud.dirty = cloud.dirty || 1; saveCloud(); }
+    await cloudPush();
+  } catch (e) { console.warn('cloud sync', e.message); }
+}
+async function linkLegacyBank() {   // one time: move this device's passcode bank connection onto the signed-in account (same Plaid Item)
+  const y = S.sync; if (!y.passcode || !y.key) return;
+  const r = await fetch(SYNC_URL_DEFAULT + '/link-legacy', { method: 'POST', body: '{}',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + y.session, 'X-App-Passcode': y.passcode, 'X-Sync-Key': y.key } });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { if (d.code === 'BAD_PASSCODE') Object.assign(y, { passcode: '', key: '', url: '' }); save(true); return; }
+  if (d.linked) Object.assign(y, { connected: true, institution: d.institution || y.institution });
+  Object.assign(y, { passcode: '', key: '', url: '' }); save(true);
+  if (d.linked) toast('Your bank connection is now linked to your account.');
+}
+async function afterLogin(d) {
+  Object.assign(S.sync, { session: d.session, label: d.label || '' }); save(true);
+  try { await linkLegacyBank(); } catch {}
+  if (cloud.user === d.user) { render(); return cloudSync(); }
+  const srv = await cloudApi('GET');
+  cloud = { user: d.user, rev: srv.rev, dirty: 0 };
+  if (!srv.data) cloud.dirty = 1;                              // empty account: upload this device's data (migration)
+  else if (!hasData(S)) adopt(srv.data, srv.rev);              // empty device: take the account's data
+  else if (confirm(`Your account already has budget data (saved ${new Date(srv.updated).toLocaleString()}).\n\nOK = use your account's data (this device's data is kept as a copy you can restore).\nCancel = replace your account's data with this device's data.`)) { keepLocalCopy(); adopt(srv.data, srv.rev); }
+  else cloud.dirty = 1;
+  saveCloud(); save(true); render(); await cloudPush();
 }
 const catById = id => S.categories.find(c => c.id === id);
 const catName = id => catById(id)?.name || 'Uncategorized';
@@ -382,12 +445,29 @@ function render() {
   matrixRain(S.settings.theme === 'matrix');
   if ((S.settings.theme === 'charcoal') !== !!$('#bgfx')) {   // Charcoal: slow drifting glow behind the cards (CSS only)
     if ($('#bgfx')) $('#bgfx').remove(); else document.body.insertAdjacentHTML('afterbegin', '<div id="bgfx" aria-hidden="true"></div>'); }
+  document.body.classList.toggle('gated', !S.sync.session);
+  if (!S.sync.session) { $('#view').innerHTML = gateHTML(); $('#title').textContent = 'Budget'; return mountGoogle(); }
   const views = { home: viewHome, plan: viewPlan, spend: viewSpend, debts: viewDebts, more: viewMore };
   $('#view').innerHTML = safe({ home: 'Home', plan: 'Paycheck', spend: 'Spending', debts: 'Debts', more: 'More' }[tab], views[tab]);
-  if (tab === 'more') mountGoogle();
   $('#title').textContent = { home: 'Dolla Overview', plan: 'Paycheck plan', spend: 'Spending', debts: 'Debts', more: 'More' }[tab];
 }
 
+function gateHTML() {
+  return `<div class="card" id="gate" style="text-align:center"><h2>Welcome</h2>
+    <p class="muted">Sign in to use your budget. It's saved to your account, so it shows up on any phone or computer.</p>
+    <div id="gsiBtn" style="min-height:44px;display:flex;justify-content:center;margin:1rem 0"></div>
+    <details class="small" id="inviteBox" style="text-align:left"><summary>Have an invite code?</summary>
+      <label for="syInvite">Invite code</label><input id="syInvite" placeholder="BUDGET-XXXX-XXXX" autocapitalize="characters" autocomplete="off" spellcheck="false">
+      <div class="row" style="margin-top:.6rem"><button data-act="syncInvite">Continue</button></div></details></div>`;
+}
+function accountHTML() {
+  const c = JSON.parse(localStorage.getItem(COPY) || 'null');
+  return `<div class="card" id="account"><h3>Account</h3>
+    <p class="small">Signed in${S.sync.label ? ' as <b>' + h(S.sync.label) + '</b>' : ''}. ${cloud.dirty ? 'Changes waiting to save to your account.' : 'Saved to your account.'}</p>
+    ${c ? `<p class="small">A copy of this device's data from ${h(new Date(c.at).toLocaleString())} was kept.</p>
+      <div class="row"><button data-act="restoreCopy">Restore that copy</button><button data-act="dropCopy">Delete copy</button></div>` : ''}
+    <div class="row" style="margin-top:.5rem"><button class="danger" data-act="signOut">Sign out</button></div></div>`;
+}
 function viewHome() {
   const wd = S.settings.countdownDate, wn = S.settings.countdownName || 'Countdown';
   const days = wd ? Math.round((parseISO(wd) - parseISO(today())) / 864e5) : null;
@@ -631,7 +711,7 @@ function checkinsHTML() {
     </details></div>`;
 }
 function viewMore() {
-  return [['Savings goals', goalsHTML], ['Work weeks', workHTML], ['Subscriptions', subsHTML], ['Weekly check-ins', checkinsHTML],
+  return [['Account', accountHTML], ['Savings goals', goalsHTML], ['Work weeks', workHTML], ['Subscriptions', subsHTML], ['Weekly check-ins', checkinsHTML],
     ['Categories & settings', moreCoreHTML], ['Advanced', advancedHTML]].map(([l, f]) => safe(l, f)).join('');
 }
 function moreCoreHTML() {
@@ -658,7 +738,7 @@ function advancedHTML() {
   <div class="card"><details id="advanced" data-keep="advOpen" ${ui.advOpen || ui.imp ? 'open' : ''}><summary><span style="font-size:1.05rem">Advanced</span>
     <span class="muted small">· CSV import, rules, backup, bank sync</span></summary>
   <section class="adv"><h3>Import bank CSV</h3>
-    <p class="small muted">Download transactions from your bank's online banking as CSV, then pick the file. Nothing leaves your phone.</p>
+    <p class="small muted">Download transactions from your bank's online banking as CSV, then pick the file. The file is read on this device; the imported transactions are saved to your account.</p>
     <input type="file" id="csvFile" accept=".csv,text/csv,text/plain">
     <div id="impArea">${safe('CSV import', importHTML)}</div></section>
   <section class="adv"><h3>Auto-categorize rules</h3>
@@ -668,7 +748,7 @@ function advancedHTML() {
     <details><summary>${S.rules.length} rules</summary><ul class="list">${S.rules.map(r => `<li data-id="${r.id}"><div class="grow"><b>${h(r.keyword)}</b> → ${h(catName(r.categoryId))}</div>
       <button class="mini danger" data-act="delRule">✕</button></li>`).join('')}</ul></details></section>
   <section class="adv"><h3>Backup &amp; restore</h3>
-    <p class="small muted">Your data lives only in this browser on this phone. Export a backup regularly (e.g. to Google Drive) — clearing browser data or uninstalling deletes it.</p>
+    <p class="small muted">Your budget is saved to your account (encrypted) and cached on this device. You can also export a backup file any time.</p>
     <div class="row"><button class="primary" data-act="export">Export backup (JSON)</button></div>
     <label for="restoreFile">Restore from backup file</label><input type="file" id="restoreFile" accept=".json,application/json">
     <details><summary class="bad">Danger zone</summary><button class="danger" data-act="reset">Erase all data &amp; start over</button></details></section>
@@ -809,26 +889,17 @@ const dayDiff = (a, b) => Math.round((parseISO(a) - parseISO(b)) / 864e5);
 const SYNC_URL_DEFAULT = 'https://budget-plaid-worker.bgwinn24.workers.dev';
 const GOOGLE_CLIENT_ID = '849416882424-q9nn6ct6e348gvuh95cp3puulpol8tsi.apps.googleusercontent.com';   // public OAuth Web client ID
 const GSI_JS = 'https://accounts.google.com/gsi/client';
-const syncOn = () => !!(S.sync.url || S.sync.session);
+const syncOn = () => !!S.sync.session;
 const syncUrl = () => (S.sync.session ? '' : S.sync.url) || SYNC_URL_DEFAULT;
 function syncCardHTML() {
-  const y = S.sync, on = syncOn(), g = !!y.session;
+  const y = S.sync, on = syncOn();
   return `<section class="adv" id="syncCard"><h3>Bank sync <span class="tag">optional</span></h3>
     <p class="small muted">Your bank login goes only to Plaid; this phone never stores bank credentials or access tokens.</p>
-    ${g ? `<p class="small">Signed in${y.label ? ' as ' + h(y.label) : ''} <button data-act="syncSignOut">Sign out</button></p>`
-      : `<div id="gsiBtn" style="min-height:44px"></div>
-      <details class="small" id="inviteBox"><summary>Have an invite code?</summary>
-      <label for="syInvite">Invite code</label><input id="syInvite" placeholder="BUDGET-XXXX-XXXX" autocapitalize="characters" autocomplete="off" spellcheck="false">
-      <div class="row" style="margin-top:.6rem"><button data-act="syncInvite">Continue</button></div></details>`}
     ${on ? `<p><b>${y.connected ? `Connected${y.institution ? ' to ' + h(y.institution) : ''}` : 'Not connected'}</b></p><p class="small">${y.lastSync ? 'Last sync: ' + new Date(y.lastSync).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : 'Never synced'}
       ${y.accounts?.length ? '<br>Accounts: ' + y.accounts.map(a => h(`${a.name || 'Account'}${a.mask ? ' ••' + a.mask : ''}`)).join(', ') : ''}</p>
       <div class="row">${y.connected ? `<button class="primary" data-act="syncNow">Sync now</button>${y.needsCardConsent ? '<button data-act="syncConsent">Allow card details</button>' : ''}${y.loginRequired ? '<button data-act="syncRelogin">Fix bank login</button>' : ''}<button class="danger" data-act="syncDisconnect">Disconnect</button>`
         : `<button class="primary" data-act="syncConnect">Connect your bank</button>`}</div>
       <p class="small muted" id="syncMsg"></p>` : ''}
-    ${g ? '' : `<details ${y.url ? 'open' : ''}><summary>Advanced: own sync server + passcode</summary>
-    <label for="syUrl">Sync server URL</label><input id="syUrl" type="url" inputmode="url" placeholder="https://….workers.dev" value="${h(y.url)}" autocomplete="off">
-    <label for="syPass">App passcode</label><input id="syPass" type="password" value="${h(y.passcode)}" autocomplete="off">
-    <div class="row" style="margin-top:.6rem"><button data-act="syncSave">Save</button></div></details>`}
     </section>`;
 }
 function loadScript(src) {
@@ -851,9 +922,7 @@ async function backendLogin(path, payload) {
       .catch(() => { throw new Error('Could not reach the sync server. Are you online?'); });
     const d = await r.json().catch(() => ({})); if (!r.ok) throw new Error(d.error || 'Sign-in failed');
     // Different login = different bank connection on the server: start this phone's link state fresh.
-    Object.assign(S.sync, { session: d.session, label: d.label || '', connected: false, institution: null, cursor: '', accounts: [] }); save(); render();
-    const st = await syncApi('status'); Object.assign(S.sync, { connected: st.connected, institution: st.institution }); save(); render();
-    toast(st.connected ? 'Signed in · bank connected' : 'Signed in. Now tap "Connect your bank".');
+    await afterLogin(d); toast('Signed in');
   } catch (e) { toast(e.message); }
 }
 async function syncApi(path, body = {}) {
@@ -865,7 +934,7 @@ async function syncApi(path, body = {}) {
       headers: { 'Content-Type': 'application/json', ...(y.session ? { Authorization: 'Bearer ' + y.session } : { 'X-App-Passcode': y.passcode, 'X-Sync-Key': y.key }) } });
   } catch { throw Object.assign(new Error('Could not reach the sync server. Are you online?'), { code: 'NETWORK' }); }
   const data = await res.json().catch(() => ({}));
-  if (data.code === 'SESSION_EXPIRED') { Object.assign(S.sync, { session: '', connected: false }); save(); render(); }
+  if (data.code === 'SESSION_EXPIRED') { S.sync.session = ''; save(true); render(); }
   if (!res.ok) throw Object.assign(new Error(data.error || `Sync server error ${res.status}`), { code: data.code, status: res.status });
   return data;
 }
@@ -980,16 +1049,6 @@ function applySync(r) {
   return n;
 }
 Object.assign(actions_sync, {
-  syncSave: () => {
-    const url = $('#syUrl').value.trim(), pass = $('#syPass').value;
-    if (url && !/^https:\/\/|^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/.test(url)) return toast('The sync server URL must start with https://');
-    const changed = url !== S.sync.url;
-    S.sync.url = url; S.sync.passcode = pass;
-    if (changed) Object.assign(S.sync, { connected: false, institution: null, cursor: '', accounts: [] });
-    save(); render();
-    if (url) syncApi('status').then(st => { Object.assign(S.sync, { connected: st.connected, institution: st.institution }); save(); render(); toast(st.connected ? 'Connected' : 'Sync server OK'); })
-      .catch(e => { toast(e.message); syncMsg(e.message); });
-  },
   syncConnect: async () => {
     try { syncMsg('Opening Plaid…'); const { link_token } = await syncApi('link-token');
       sessionStorage.setItem('plaidLinkToken', link_token); sessionStorage.setItem('plaidLinkMode', 'new'); await openLink(link_token); syncMsg(''); }
@@ -997,9 +1056,15 @@ Object.assign(actions_sync, {
   },
   syncNow: () => syncNow(false),
   syncInvite: () => { const c = $('#syInvite').value.trim(); if (!c) return toast('Enter your invite code.'); inviteLogin(c); },
-  syncSignOut: () => { if (!confirm('Sign out of bank sync on this phone? Your bank stays connected; sign in again to come back.')) return;
+  signOut: async () => {
+    if (!confirm('Sign out? Your budget is removed from this device but stays saved in your account.')) return;
+    if (cloud.dirty) { await cloudPush(); if (cloud.dirty && !confirm("Some changes haven't reached your account (offline?) and will be lost. Sign out anyway?")) return; }
     window.google?.accounts?.id?.disableAutoSelect();
-    Object.assign(S.sync, { session: '', label: '', connected: false, institution: null, cursor: '', accounts: [] }); save(); render(); },
+    [KEY, CLOUD, COPY].forEach(k => localStorage.removeItem(k)); location.reload();
+  },
+  restoreCopy: () => { const c = JSON.parse(localStorage.getItem(COPY) || 'null'); if (!c || !confirm('Replace your current budget with the kept copy? (It will be saved to your account.)')) return;
+    adopt(c.data, cloud.rev); localStorage.removeItem(COPY); save(); render(); toast('Copy restored'); },
+  dropCopy: () => { if (confirm('Delete the kept copy?')) { localStorage.removeItem(COPY); render(); } },
   syncConsent: () => openUpdate(true),
   syncRelogin: () => openUpdate(false),
   syncDisconnect: async () => {
@@ -1109,7 +1174,7 @@ const actions = {
     ds.forEach(d => { if (all) delete S.work.days[d]; else S.work.days[d] = true; }); save(); render(); },
   dismissCheckin: el => { const c = weekSummary(el.dataset.ws); S.checkins.unshift({ ...c, dismissed: new Date().toISOString() }); S.checkins = S.checkins.slice(0, 104); save(); render(); },
   setSub: el => { const k = el.closest('[data-key]').dataset.key, v = el.dataset.v; if (S.subStatus[k] === v) delete S.subStatus[k]; else S.subStatus[k] = v; save(); render(); },
-  reset: () => { if (confirm('Erase ALL budget data on this device? Export a backup first!') && confirm('Really erase everything?')) { S = defaults(); save(); ui.imp = null; render(); toast('Reset done'); } }
+  reset: () => { if (confirm('Erase ALL budget data on this device? Export a backup first!') && confirm('Really erase everything?')) { const dev = Object.fromEntries(DEVICE.map(k => [k, S.sync[k]])); S = defaults(); Object.assign(S.sync, dev); save(); ui.imp = null; render(); toast('Reset done'); } }
 };
 document.addEventListener('click', e => {
   const t = e.target.closest('[data-tab]'); if (t && t.closest('.tabs')) { tab = t.dataset.tab; ui.editTxn = null; render(); scrollTo(0, 0); return; }
@@ -1169,7 +1234,11 @@ async function restore(file) {
 }
 
 /* ---------- boot ---------- */
+if (S.sync.session && !cloud.user) { S.sync.session = ''; save(true); }   // v2.7 bank-only login: sign in again once
 render();
+cloudSync();
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') cloudSync(); else cloudPush(); });
+addEventListener('online', cloudSync);
 const net = () => $('#offline').classList.toggle('hidden', navigator.onLine);
 addEventListener('online', net); addEventListener('offline', net); net();
 if ('serviceWorker' in navigator) {
@@ -1194,4 +1263,4 @@ if (syncOn() && /[?&]oauth_state_id=/.test(location.search) && sessionStorage.ge
 } else if (syncOn() && S.sync.connected && navigator.onLine && (!S.sync.lastSync || Date.now() - Date.parse(S.sync.lastSync) > 6 * 3600e3)) {
   setTimeout(() => syncNow(true), 1500);
 }
-window.__budget = { get state() { return S; }, goalStatus, workWeeks, weekSummary, dueCheckin, detectSubs, merchKey, parseCSV, parseDate, autoCat, computePlan, debtStatus, applySync, applyCards, safeToSpend };
+window.__budget = { get state() { return S; }, get cloud() { return cloud; }, goalStatus, workWeeks, weekSummary, dueCheckin, detectSubs, merchKey, parseCSV, parseDate, autoCat, computePlan, debtStatus, applySync, applyCards, safeToSpend };
