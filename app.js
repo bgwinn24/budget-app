@@ -994,22 +994,30 @@ async function openUpdate(addLiabilities) {   // Link update mode on the existin
     await openLink(link_token, null, 'update');
   } catch (e) { toast(e.message); }
 }
-let syncing = false;
+let syncing = false, loadingTries = 0;
 async function syncNow(quiet) {
   if (syncing || !syncOn() || !S.sync.connected) return; syncing = true; syncMsg('Syncing…');
-  const tot = { added: 0, matched: 0, updated: 0, removed: 0 }; const made = [];
+  const tot = { added: 0, matched: 0, updated: 0, removed: 0 }; const made = []; let loading = false;
   try {
     for (let i = 0; i < 20; i++) {
       const r = await syncApi('sync', { cursor: S.sync.cursor || '' });
       const c = applySync(r); for (const k in tot) tot[k] += c[k]; made.push(...c.paychecks);
       if (r.accounts?.length) S.sync.accounts = r.accounts;
       S.sync.cursor = r.next_cursor; save();            // cursor saved only after the batch is applied
+      loading = ['NOT_READY', 'INITIAL_UPDATE_COMPLETE'].includes(r.update_status);   // Plaid still pulling history
       if (!r.has_more) break;
     }
     let cards = 0;
     try { cards = applyCards(await syncApi('liabilities')); }
     catch (e) { if (e.code === 'NOT_CONNECTED' || e.code === 'ITEM_LOGIN_REQUIRED') throw e; console.warn('card details unavailable', e.message); }
     S.sync.lastSync = new Date().toISOString(); S.sync.loginRequired = false; save(); render();
+    if (loading && !tot.added) {   // first minutes after connecting: history not ready yet; check again automatically
+      syncMsg('Your bank is still sending your transactions. This can take a few minutes; we will check again automatically.');
+      if (!quiet) toast('Your bank is still sending your transactions (can take a few minutes). We will check again automatically.');
+      if (loadingTries++ < 10) setTimeout(() => syncNow(true), 60000);
+      return;
+    }
+    loadingTries = 0;
     if (!quiet || tot.added || made.length || cards) toast(`Bank sync: ${tot.added} new, ${tot.matched} matched, ${tot.updated} updated, ${tot.removed} removed${cards ? ` · ${cards} card${cards === 1 ? '' : 's'} added to Debts` : ''}${payToast(made)}`);
   } catch (e) {
     if (e.code === 'NOT_CONNECTED') { S.sync.connected = false; save(); render(); }
