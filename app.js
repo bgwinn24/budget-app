@@ -453,9 +453,18 @@ function render() {
 }
 
 function gateHTML() {
-  return `<div class="card" id="gate" style="text-align:center"><h2>Welcome</h2>
-    <p class="muted">Sign in to use your budget. It's saved to your account, so it shows up on any phone or computer.</p>
-    <div id="gsiBtn" style="min-height:44px;display:flex;justify-content:center;margin:1rem 0"></div>
+  const c = ui.pwMode !== 'signin';
+  return `<div class="card" id="gate" style="text-align:center">
+    <img src="icons/icon-192.png" alt="" width="88" height="88" style="border-radius:20px;margin:.5rem auto .3rem;display:block">
+    <h2 style="margin:.2rem 0">${c ? 'Create your account' : 'Sign in'}</h2>
+    <p class="small muted">Your budget is saved to your account, so it shows up on any phone or computer.</p>
+    <form id="pwForm" style="text-align:left">
+      <label for="pwEmail">Email</label><input id="pwEmail" type="email" autocomplete="email" inputmode="email" required>
+      <label for="pwPass">Password${c ? ' (at least 8 characters)' : ''}</label><input id="pwPass" type="password" minlength="8" autocomplete="${c ? 'new-password' : 'current-password'}" required>
+      <button class="primary" type="submit" style="width:100%;margin-top:.8rem">${c ? 'Create account' : 'Sign in'}</button></form>
+    <p class="small"><a href="#" data-act="pwToggle">${c ? 'Already have an account? Sign in' : 'New here? Create an account'}</a></p>
+    <p class="small muted" style="margin:.8rem 0 .3rem">or</p>
+    <div id="gsiBtn" style="min-height:44px;display:flex;justify-content:center;margin-bottom:.8rem"></div>
     <details class="small" id="inviteBox" style="text-align:left"><summary>Have an invite code?</summary>
       <label for="syInvite">Invite code</label><input id="syInvite" placeholder="BUDGET-XXXX-XXXX" autocapitalize="characters" autocomplete="off" spellcheck="false">
       <div class="row" style="margin-top:.6rem"><button data-act="syncInvite">Continue</button></div></details></div>`;
@@ -911,10 +920,15 @@ async function mountGoogle() {
   try {
     if (!window.google?.accounts?.id) await loadScript(GSI_JS);
     if (!mountGoogle.done) { google.accounts.id.initialize({ client_id: GOOGLE_CLIENT_ID, callback: onGoogleCredential }); mountGoogle.done = true; }
-    if (el.isConnected) google.accounts.id.renderButton(el, { theme: 'filled_blue', size: 'large', text: 'signin_with', shape: 'pill', width: Math.min(el.clientWidth || 320, 400) });
+    if (el.isConnected) google.accounts.id.renderButton(el, { theme: 'outline', size: 'large', text: 'signin_with', shape: 'pill', width: Math.min(el.clientWidth || 320, 400) });
   } catch { el.innerHTML = '<p class="small muted">Could not load Google sign-in. Are you online?</p>'; }
 }
 async function onGoogleCredential(resp) { await backendLogin('google-login', { credential: resp.credential }); }
+document.addEventListener('submit', e => { if (e.target.id !== 'pwForm') return; e.preventDefault();
+  const email = $('#pwEmail').value.trim(), password = $('#pwPass').value;
+  if (ui.pwMode !== 'signin' && password.length < 8) return toast('Use at least 8 characters for your password.');
+  backendLogin(ui.pwMode === 'signin' ? 'login' : 'register', { email, password });
+});
 async function inviteLogin(code) { await backendLogin('invite-login', { code }); }
 async function backendLogin(path, payload) {
   try {
@@ -1056,6 +1070,7 @@ Object.assign(actions_sync, {
   },
   syncNow: () => syncNow(false),
   syncInvite: () => { const c = $('#syInvite').value.trim(); if (!c) return toast('Enter your invite code.'); inviteLogin(c); },
+  pwToggle: () => { ui.pwMode = ui.pwMode === 'signin' ? 'create' : 'signin'; render(); },
   signOut: async () => {
     if (!confirm('Sign out? Your budget is removed from this device but stays saved in your account.')) return;
     if (cloud.dirty) { await cloudPush(); if (cloud.dirty && !confirm("Some changes haven't reached your account (offline?) and will be lost. Sign out anyway?")) return; }
