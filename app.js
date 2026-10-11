@@ -454,18 +454,20 @@ function render() {
 
 function gateHTML() {
   const c = ui.pwMode !== 'signin';
-  return `<div class="card" id="gate" style="text-align:center">
-    <img src="icons/icon-192.png" alt="" width="88" height="88" style="border-radius:20px;margin:.5rem auto .3rem;display:block">
-    <h2 style="margin:.2rem 0">${c ? 'Create your account' : 'Sign in'}</h2>
-    <p class="small muted">Your budget is saved to your account, so it shows up on any phone or computer.</p>
-    <form id="pwForm" style="text-align:left">
+  return `<div class="card" id="gate">
+    <img class="logo" src="icons/icon-192.png" alt="" width="84" height="84">
+    <h1 class="brand">Dolla</h1>
+    <p class="tagline">Budgeting for people paid weekly.</p>
+    <h2>${c ? 'Create your account' : 'Welcome back'}</h2>
+    <p class="small muted">Saved to your account, so it's on any phone or computer.</p>
+    <form id="pwForm">
       <label for="pwEmail">Email</label><input id="pwEmail" type="email" autocomplete="email" inputmode="email" required>
       <label for="pwPass">Password${c ? ' (at least 8 characters)' : ''}</label><input id="pwPass" type="password" minlength="8" autocomplete="${c ? 'new-password' : 'current-password'}" required>
       ${c ? `<label for="pwInvite">Invite code</label><input id="pwInvite" placeholder="BUDGET-XXXX-XXXX" value="${h(ui.invite || '')}" autocapitalize="characters" autocomplete="off" spellcheck="false" required>` : ''}
-      <button class="primary" type="submit" style="width:100%;margin-top:.8rem">${c ? 'Create account' : 'Sign in'}</button></form>
+      <button class="primary" type="submit">${c ? 'Create account' : 'Sign in'}</button></form>
     <p class="small"><a href="#" data-act="pwToggle">${c ? 'Already have an account? Sign in' : 'New here? Create an account'}</a></p>
-    <p class="small muted" style="margin:.8rem 0 .3rem">or</p>
-    <div id="gsiBtn" style="min-height:44px;display:flex;justify-content:center;margin-bottom:.8rem"></div>
+    <div class="or">or</div>
+    <div id="gsiBtn" style="min-height:44px;display:flex;justify-content:center;margin-bottom:var(--s3)"></div>
     <details class="small" id="inviteBox" style="text-align:left"><summary>Have an invite code?</summary>
       <label for="syInvite">Invite code</label><input id="syInvite" placeholder="BUDGET-XXXX-XXXX" autocapitalize="characters" autocomplete="off" spellcheck="false">
       <div class="row" style="margin-top:.6rem"><button data-act="syncInvite">Continue</button></div></details></div>`;

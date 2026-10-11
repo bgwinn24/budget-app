@@ -1,6 +1,6 @@
 {
-  "name": "Budget",
-  "short_name": "Budget",
+  "name": "Dolla",
+  "short_name": "Dolla",
   "description": "Weekly paycheck plan, spending, debts. Data stays on-device.",
   "id": "./",
   "start_url": "./",

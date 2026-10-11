@@ -118,3 +118,46 @@ section.adv h3{margin:0 0 .4rem;font-size:1rem}
 @media (prefers-reduced-motion:reduce){#bgfx{animation:none}}
 .topbar h1{text-align:center} .topbar #offline{position:absolute;right:1rem}
 body.gated .tabs{display:none}
+
+/* ---------- v2.9 polish: spacing scale, type, consistent controls, motion (theme colors unchanged) ---------- */
+:root{--s1:.25rem;--s2:.5rem;--s3:.75rem;--s4:1rem;--s5:1.5rem;--r-sm:10px;--r:16px;--ease:cubic-bezier(.2,.7,.2,1);
+  --ring:0 0 0 3px color-mix(in srgb,var(--accent) 35%,transparent)}
+html,body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+h1,h2,h3{letter-spacing:-.01em;line-height:1.25}
+.topbar{padding:calc(var(--s3) + env(safe-area-inset-top)) var(--s4) var(--s3);box-shadow:0 1px 0 rgba(0,0,0,.06)}
+.topbar h1{font-size:1.1rem;font-weight:700}
+main{padding:var(--s4) var(--s4) calc(5.5rem + env(safe-area-inset-bottom))}
+.card{border-radius:var(--r);padding:var(--s4) calc(var(--s4) + 2px);margin-bottom:var(--s4);
+  box-shadow:var(--shadow),0 4px 14px -8px rgba(0,0,0,.12)}
+.card h2{font-size:1.05rem;font-weight:700;margin:0 0 var(--s3)}
+.card h3{font-size:.95rem;font-weight:650;margin:var(--s4) 0 var(--s2)}
+label{font-weight:500;margin:var(--s3) 0 var(--s1)}
+input,select,textarea{border-radius:var(--r-sm);padding:var(--s2) var(--s3);transition:border-color .15s,box-shadow .15s}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent);box-shadow:var(--ring)}
+button,.btn{border-radius:var(--r-sm);padding:var(--s2) var(--s4);font-weight:500;
+  transition:transform .12s var(--ease),filter .15s,background-color .15s,border-color .15s,box-shadow .15s}
+button:hover{filter:brightness(1.04)} button:active{transform:scale(.98)}
+button:focus-visible,.chip:focus-visible,summary:focus-visible,a:focus-visible{outline:none;box-shadow:var(--ring)}
+button.primary{box-shadow:0 1px 2px rgba(0,0,0,.12)}
+button.mini{border-radius:8px}
+.row{gap:var(--s2)}
+.tabs{box-shadow:0 -1px 0 rgba(0,0,0,.03)}
+.tabs button{border-radius:0;transition:color .15s}
+.tabs button span{transition:transform .2s var(--ease)} .tabs button.active span{transform:translateY(-1px) scale(1.08)}
+.toast{border-radius:12px;box-shadow:0 6px 20px rgba(0,0,0,.25)}
+.bar>i{transition:width .5s var(--ease)}
+details summary{list-style-position:outside}
+@keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+/* sign-in screen */
+#gate{animation:rise .3s var(--ease) both;max-width:420px;margin:var(--s5) auto;padding:var(--s5) var(--s5) var(--s4);text-align:center}
+#gate .logo{width:84px;height:84px;border-radius:22px;display:block;margin:0 auto var(--s3);box-shadow:0 8px 24px -10px rgba(0,0,0,.35)}
+#gate .brand{font-size:2rem;font-weight:800;letter-spacing:-.03em;margin:0}
+#gate .tagline{color:var(--muted);margin:var(--s1) 0 var(--s5)}
+#gate h2{font-size:1.05rem;margin:0 0 var(--s1)}
+#gate form{text-align:left}
+#gate button[type=submit]{width:100%;margin-top:var(--s4);min-height:48px;font-size:1rem}
+#gate .or{display:flex;align-items:center;gap:var(--s3);color:var(--muted);font-size:.85rem;margin:var(--s4) 0}
+#gate .or::before,#gate .or::after{content:"";flex:1;height:1px;background:var(--line)}
+#gate a{color:var(--accent);text-decoration:none;font-weight:500}
+body.gated .topbar{display:none} body.gated main{padding-top:var(--s5)}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}

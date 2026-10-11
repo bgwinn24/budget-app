@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Get Dolla — budgeting for people paid weekly</title>
+<meta name="description" content="Dolla is a simple weekly budget app for people paid every week. Free, works offline, installs on your phone.">
+<meta name="theme-color" content="#0f766e">
+<link rel="icon" type="image/png" href="../icons/icon-192.png">
+<style>
+:root{--bg:#f4f7f7;--card:#fff;--text:#14201f;--muted:#5b6b69;--line:#d9e2e1;--accent:#0f766e;--ink:#fff}
+@media (prefers-color-scheme:dark){:root{--bg:#0b1416;--card:#132024;--text:#e6efee;--muted:#93a8a6;--line:#25393c;--accent:#2dd4bf;--ink:#06201d}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:17px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;-webkit-font-smoothing:antialiased}
+main{max-width:860px;margin:0 auto;padding:2.5rem 1.25rem 3rem}
+header{text-align:center}
+.logo{width:96px;height:96px;border-radius:24px;box-shadow:0 10px 30px -12px rgba(0,0,0,.4)}
+h1{font-size:2.6rem;letter-spacing:-.03em;margin:.6rem 0 .2rem}
+.pitch{font-size:1.2rem;color:var(--muted);margin:0 auto 1.6rem;max-width:32rem}
+.cta{display:inline-block;background:var(--accent);color:var(--ink);text-decoration:none;font-weight:700;font-size:1.15rem;padding:1rem 2.2rem;border-radius:14px;box-shadow:0 6px 18px -8px rgba(0,0,0,.45);transition:transform .12s}
+.cta:active{transform:scale(.98)}
+.note{font-size:.9rem;color:var(--muted);margin-top:.8rem}
+ul.features{list-style:none;padding:0;margin:2.2rem 0;display:grid;gap:.8rem;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+ul.features li{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:1rem 1.1rem}
+ul.features b{display:block;margin-bottom:.2rem}
+.shots{display:flex;gap:1.2rem;justify-content:center;flex-wrap:wrap;margin:1rem 0 2rem}
+.shots img{width:240px;max-width:44vw;border-radius:22px;border:1px solid var(--line);box-shadow:0 14px 34px -16px rgba(0,0,0,.45)}
+section.install{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:1.2rem 1.4rem}
+section.install h2{margin:0 0 .5rem;font-size:1.2rem}
+section.install ol{margin:0;padding-left:1.2rem}
+footer{text-align:center;color:var(--muted);font-size:.85rem;margin-top:2rem}
+@media (prefers-reduced-motion:reduce){.cta{transition:none}}
+</style>
+</head>
+<body>
+<main>
+<header>
+  <img class="logo" src="../icons/icon-192.png" alt="Dolla app icon" width="96" height="96">
+  <h1>Dolla</h1>
+  <p class="pitch">The budget app for people paid every week. Know exactly what's safe to spend until your next paycheck.</p>
+  <a class="cta" href="../">Open &amp; install</a>
+  <p class="note">New accounts need an invite code from a friend who uses Dolla.</p>
+</header>
+<ul class="features">
+  <li><b>Safe to spend this week</b>One clear number, based on your paycheck, bills and plan, that resets every week.</li>
+  <li><b>Plan every paycheck</b>Split each weekly check into bills, gas, food and savings in seconds.</li>
+  <li><b>Optional bank sync</b>Connect your bank to bring in transactions automatically (limited spots), or just add spending by hand.</li>
+</ul>
+<div class="shots">
+  <img src="shot-login.jpg" alt="Dolla sign-in screen" width="390" height="844" loading="lazy">
+  <img src="shot-home.jpg" alt="Dolla home screen showing safe to spend this week" width="390" height="844" loading="lazy">
+</div>
+<section class="install">
+  <h2>Install on Android (Chrome)</h2>
+  <ol>
+    <li>Tap <b>Open &amp; install</b> above in Chrome.</li>
+    <li>Tap the <b>⋮</b> menu, then <b>Add to Home screen</b> (or <b>Install app</b>).</li>
+    <li>Open Dolla from your home screen and create your account with your invite code.</li>
+  </ol>
+</section>
+<footer>Free. Works offline. Your budget is saved, encrypted, to your account.</footer>
+</main>
+</body>
+</html>
