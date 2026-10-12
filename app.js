@@ -535,19 +535,43 @@ function matrixRain(on) {
   if (!rain.wired) { rain.wired = true; addEventListener('resize', () => rain.c && rain.start()); reduce.addEventListener?.('change', () => rain.c && rain.start()); }
   rain.start = start; start();
 }
+/* Grimoire mockup: original five-leaf clover glyph + drifting black/crimson sparks */
+const CLOVER = `<svg class="clover" viewBox="-50 -50 100 100" aria-hidden="true">${[0, 72, 144, 216, 288].map(r => `<path transform="rotate(${r})" d="M0 -4 C-14 -14 -20 -30 -10 -40 C-5 -45 0 -42 0 -36 C0 -42 5 -45 10 -40 C20 -30 14 -14 0 -4Z" fill="#14070a" stroke="#c9a45c" stroke-width="3"/>`).join('')}<circle r="6" fill="#b3122e" stroke="#c9a45c" stroke-width="2"/></svg>`;
+const spk = {};
+function sparks(on) {
+  if (on === !!spk.c) return;
+  if (!on) { cancelAnimationFrame(spk.raf); spk.c.remove(); spk.c = null; return; }
+  const c = spk.c = document.createElement('canvas'), x = c.getContext('2d'); c.id = 'sparks'; c.setAttribute('aria-hidden', 'true'); document.body.prepend(c);
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)'); let W, H, P;
+  const mk = () => ({ x: Math.random() * W, y: Math.random() * H, r: 1 + Math.random() * 2.6, vx: (Math.random() - .5) * .25, vy: -.15 - Math.random() * .45,
+    a: .25 + Math.random() * .5, red: Math.random() < .45, ph: Math.random() * 6.28 });
+  const draw = t => { x.clearRect(0, 0, W, H);
+    for (const p of P) { const fl = .65 + .35 * Math.sin(t / 600 + p.ph); x.globalAlpha = p.a * fl;
+      x.fillStyle = p.red ? '#c4243d' : '#000'; x.shadowColor = p.red ? '#ff2a4a' : '#5a0d18'; x.shadowBlur = p.red ? 8 : 6;
+      x.beginPath(); x.moveTo(p.x, p.y - p.r * 2); x.lineTo(p.x + p.r, p.y); x.lineTo(p.x, p.y + p.r * 2); x.lineTo(p.x - p.r, p.y); x.fill(); } };
+  const loop = t => { spk.raf = requestAnimationFrame(loop); if (document.hidden) return;
+    for (const p of P) { p.x += p.vx + Math.sin(t / 900 + p.ph) * .15; p.y += p.vy; if (p.y < -10 || p.x < -10 || p.x > W + 10) Object.assign(p, mk(), { y: H + 5 }); } draw(t); };
+  const start = () => { if (spk.c !== c) return; cancelAnimationFrame(spk.raf); const r = devicePixelRatio || 1; W = innerWidth; H = innerHeight;
+    c.width = W * r; c.height = H * r; x.setTransform(r, 0, 0, r, 0, 0); P = Array.from({ length: Math.round(W * H / 5500) }, mk);
+    if (reduce.matches) draw(0); else spk.raf = requestAnimationFrame(loop); };
+  if (!spk.wired) { spk.wired = true; addEventListener('resize', () => spk.c && spk.start()); reduce.addEventListener?.('change', () => spk.c && spk.start()); }
+  spk.start = start; start();
+}
 function render() {
   $$('.tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   document.documentElement.dataset.theme = S.settings.theme === 'auto' ? '' : S.settings.theme;
   if (S.settings.theme === 'auto') delete document.documentElement.dataset.theme;
-  matrixRain(S.settings.theme === 'matrix');
+  matrixRain(S.settings.theme === 'matrix'); sparks(S.settings.theme === 'grimoire');
   if ((S.settings.theme === 'charcoal') !== !!$('#bgfx')) {   // Charcoal: slow drifting glow behind the cards (CSS only)
     if ($('#bgfx')) $('#bgfx').remove(); else document.body.insertAdjacentHTML('afterbegin', '<div id="bgfx" aria-hidden="true"></div>'); }
   document.body.classList.toggle('gated', !S.sync.session);
-  if (!S.sync.session) { $('#view').innerHTML = gateHTML(); $('#title').textContent = 'Budget'; return mountGoogle(); }
+  const orn = () => { if (S.settings.theme === 'grimoire') $('#title').insertAdjacentHTML('afterbegin', CLOVER); };
+  if (!S.sync.session) { $('#view').innerHTML = gateHTML(); $('#title').textContent = 'Budget'; orn(); if (S.settings.theme === 'grimoire') $('#gate .brand').insertAdjacentHTML('beforebegin', CLOVER); return mountGoogle(); }
   const views = { home: viewHome, plan: viewPlan, spend: viewSpend, debts: viewDebts, more: viewMore, insights: viewInsights, accounts: viewAccounts };
   $$('.tabs button').forEach(b => { if (['insights', 'accounts'].includes(tab)) b.classList.toggle('active', b.dataset.tab === 'more'); });
   $('#view').innerHTML = safe({ home: 'Home', plan: 'Paycheck', spend: 'Spending', debts: 'Debts', more: 'More', insights: 'Insights', accounts: 'Accounts' }[tab], views[tab]);
   $('#title').textContent = { home: 'Dolla Overview', plan: 'Paycheck plan', spend: 'Spending', debts: 'Debts', more: 'More', insights: 'Insights', accounts: 'Accounts' }[tab];
+  orn();
 }
 
 function gateHTML() {
@@ -844,7 +868,7 @@ function moreCoreHTML() {
     <button data-act="addCat" style="margin-top:.6rem">+ Add category</button></details></div>
   <div class="card"><h2>Settings</h2>
     <div class="grid2"><div><label for="sWeek">Week starts on</label><select id="sWeek" data-set="weekStart">${opts(['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].map((d, i) => [i, d]), S.settings.weekStart)}</select></div>
-      <div><label for="sTheme">Theme</label><select id="sTheme" data-set="theme">${opts([['auto', 'Match phone'], ['light', 'Light'], ['dark', 'Dark'], ['charcoal', 'Charcoal'], ['matrix', 'Matrix']], S.settings.theme)}</select></div></div>
+      <div><label for="sTheme">Theme</label><select id="sTheme" data-set="theme">${opts([['auto', 'Match phone'], ['light', 'Light'], ['dark', 'Dark'], ['charcoal', 'Charcoal'], ['matrix', 'Matrix'], ['grimoire', 'Grimoire']], S.settings.theme)}</select></div></div>
     <div class="grid2"><div><label for="sCdName">Countdown event name (optional)</label><input id="sCdName" data-set="countdownName" placeholder="e.g. Vacation" value="${h(S.settings.countdownName || '')}"></div>
       <div><label for="sCdDate">Countdown date (optional)</label><input id="sCdDate" type="date" data-set="countdownDate" value="${h(S.settings.countdownDate || '')}"></div></div>
     <p class="small muted">v2.1 · ${S.transactions.length} transactions stored on this device.</p></div>`;
