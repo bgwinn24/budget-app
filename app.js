@@ -535,8 +535,30 @@ function matrixRain(on) {
   if (!rain.wired) { rain.wired = true; addEventListener('resize', () => rain.c && rain.start()); reduce.addEventListener?.('change', () => rain.c && rain.start()); }
   rain.start = start; start();
 }
-/* Grimoire mockup: original five-leaf clover glyph + drifting black/crimson sparks */
-const CLOVER = `<svg class="clover" viewBox="-50 -50 100 100" aria-hidden="true">${[0, 72, 144, 216, 288].map(r => `<path transform="rotate(${r})" d="M0 -4 C-14 -14 -20 -30 -10 -40 C-5 -45 0 -42 0 -36 C0 -42 5 -45 10 -40 C20 -30 14 -14 0 -4Z" fill="#14070a" stroke="#c9a45c" stroke-width="3"/>`).join('')}<circle r="6" fill="#b3122e" stroke="#c9a45c" stroke-width="2"/></svg>`;
+/* Grimoire: drifting black/crimson sparks behind the cards */
+/* LOGO:start — theme-matched app logo (inline SVG, original art). bleed = full-square background (maskable/apple icons). */
+let logoN = 0;
+function logoSVG(theme, { bleed = false, r = 64, cls = 'logo' } = {}) {
+  const id = 'lg' + (++logoN), t = ({ matrix: 1, charcoal: 1, grimoire: 1 })[theme] ? theme : 'default';
+  const P = { default: { bg: ['#14a08e', '#0b5f55'], coin: ['#ffe58a', '#f4b92c', '#c98a0e'], rim: '#9a6608', sign: '#6b4504' },
+    matrix: { bg: ['#03140a', '#000'], coin: ['#062b12', '#03170a', '#020c05'], rim: '#00ff41', sign: '#00ff41' },
+    charcoal: { bg: ['#34363b', '#18191b'], coin: ['#ff7a7a', '#e02424', '#9b1414'], rim: '#6d0f0f', sign: '#fff4f4' },
+    grimoire: { bg: ['#5a0d18', '#0b0a0c'] } }[t];
+  const sq = bleed ? `<rect x="-100" y="-100" width="200" height="200" fill="url(#${id}b)"/>` : `<rect x="-100" y="-100" width="200" height="200" rx="46" fill="url(#${id}b)"/>`;
+  const bg = `<radialGradient id="${id}b" cx="35%" cy="25%" r="95%"><stop offset="0" stop-color="${P.bg[0]}"/><stop offset="1" stop-color="${P.bg[1]}"/></radialGradient>`;
+  let art;
+  if (t === 'grimoire') {
+    art = `<g transform="scale(${r / 46})">${[0, 72, 144, 216, 288].map(a => `<path transform="rotate(${a})" d="M0 -4 C-14 -14 -20 -30 -10 -40 C-5 -45 0 -42 0 -36 C0 -42 5 -45 10 -40 C20 -30 14 -14 0 -4Z" fill="#14070a" stroke="#d8b46a" stroke-width="2.6" stroke-linejoin="round"/>`).join('')}<circle r="6.5" fill="#b3122e" stroke="#d8b46a" stroke-width="2"/></g>`
+      + (bleed ? '' : `<rect x="-92" y="-92" width="184" height="184" rx="40" fill="none" stroke="#c9a45c" stroke-width="3" opacity=".8"/>`);
+  } else {
+    const k = r / 100, glow = t === 'matrix' ? ` filter="url(#${id}g)"` : '';
+    art = `<g${glow}><circle r="${r}" fill="url(#${id}c)" stroke="${P.rim}" stroke-width="${6 * k}"/><circle r="${r * .8}" fill="none" stroke="${P.rim}" stroke-width="${3 * k}" opacity=".55"/>
+      <g transform="scale(${k})" fill="none" stroke="${P.sign}" stroke-linecap="round" stroke-linejoin="round"><path d="M0 -58 V58" stroke-width="11"/><path d="M33 -29 C25 -44 -35 -46 -35 -18 C-35 8 35 2 35 28 C35 52 -27 52 -37 34" stroke-width="15"/></g></g>`;
+  }
+  const defs = `<defs>${bg}${P.coin ? `<radialGradient id="${id}c" cx="35%" cy="30%" r="75%"><stop offset="0" stop-color="${P.coin[0]}"/><stop offset=".6" stop-color="${P.coin[1]}"/><stop offset="1" stop-color="${P.coin[2]}"/></radialGradient>` : ''}${t === 'matrix' ? `<filter id="${id}g" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>` : ''}</defs>`;
+  return `<svg class="${cls}" viewBox="-100 -100 200 200" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">${defs}${sq}${art}</svg>`;
+}
+/* LOGO:end */
 const spk = {};
 function sparks(on) {
   if (on === !!spk.c) return;
@@ -565,8 +587,8 @@ function render() {
   if ((S.settings.theme === 'charcoal') !== !!$('#bgfx')) {   // Charcoal: slow drifting glow behind the cards (CSS only)
     if ($('#bgfx')) $('#bgfx').remove(); else document.body.insertAdjacentHTML('afterbegin', '<div id="bgfx" aria-hidden="true"></div>'); }
   document.body.classList.toggle('gated', !S.sync.session);
-  const orn = () => { if (S.settings.theme === 'grimoire') $('#title').insertAdjacentHTML('afterbegin', CLOVER); };
-  if (!S.sync.session) { $('#view').innerHTML = gateHTML(); $('#title').textContent = 'Budget'; orn(); if (S.settings.theme === 'grimoire') $('#gate .brand').insertAdjacentHTML('beforebegin', CLOVER); return mountGoogle(); }
+  const orn = () => $('#title').insertAdjacentHTML('afterbegin', logoSVG(S.settings.theme, { cls: 'hlogo' }));
+  if (!S.sync.session) { $('#view').innerHTML = gateHTML(); $('#title').textContent = 'Budget'; orn(); return mountGoogle(); }
   const views = { home: viewHome, plan: viewPlan, spend: viewSpend, debts: viewDebts, more: viewMore, insights: viewInsights, accounts: viewAccounts };
   $$('.tabs button').forEach(b => { if (['insights', 'accounts'].includes(tab)) b.classList.toggle('active', b.dataset.tab === 'more'); });
   $('#view').innerHTML = safe({ home: 'Home', plan: 'Paycheck', spend: 'Spending', debts: 'Debts', more: 'More', insights: 'Insights', accounts: 'Accounts' }[tab], views[tab]);
@@ -577,7 +599,7 @@ function render() {
 function gateHTML() {
   const c = ui.pwMode !== 'signin';
   return `<div class="card" id="gate">
-    <img class="logo" src="icons/icon-192.png" alt="" width="84" height="84">
+    ${logoSVG(S.settings.theme)}
     <h1 class="brand">Dolla</h1>
     <p class="tagline">Budgeting for people paid weekly.</p>
     <h2>${c ? 'Create your account' : 'Welcome back'}</h2>
