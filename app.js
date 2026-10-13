@@ -648,7 +648,7 @@ function viewHome() {
       : `<div class="huge muted" id="safeNum">—</div><p class="small muted">Enter your paycheck on the <b>Paycheck</b> tab to see this.</p>`}
     <div class="row" style="margin-top:.6rem"><button class="primary" data-act="goto" data-tab="spend">+ Add spending</button>
       ${syncOn() && y.connected ? `<button data-act="syncNow" id="homeSync">⟳ Sync now</button>` : ''}</div>
-    ${y.url && y.connected && y.lastSync ? `<div class="small muted" style="margin-top:.3rem">Bank synced ${new Date(y.lastSync).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</div>` : ''}
+    ${(y.url || syncOn()) && y.connected ? `<div class="small muted" id="bankSt" style="margin-top:.3rem">${bankStText()}</div>` : ''}
   </div>
   ${safe('Weekly check-in', () => { const c = dueCheckin(); return c ? `<div class="card" id="checkinCard"><div class="row"><h2 style="margin:0">Last week · ${fmtShort(c.ws)} – ${fmtShort(c.we)}</h2>
     <button class="mini" data-act="dismissCheckin" data-ws="${c.ws}" style="flex:0 0 auto">Got it</button></div>${checkinHTML(c)}</div>` : ''; })}
@@ -1164,8 +1164,19 @@ async function openUpdate(addLiabilities) {   // Link update mode on the existin
   } catch (e) { toast(e.message); }
 }
 let syncing = false, loadingTries = 0;
-async function syncNow(quiet) {
-  if (syncing || !syncOn() || !S.sync.connected) return; syncing = true; syncMsg('Syncing…');
+const bankStText = () => syncing ? 'Syncing…' : !S.sync.lastSync ? '' : Date.now() - Date.parse(S.sync.lastSync) < 120e3 ? 'Updated just now'
+  : 'Bank synced ' + new Date(S.sync.lastSync).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+const bankSt = () => { const e = $('#bankSt'); if (e) e.textContent = bankStText(); };
+/* Auto bank sync on open / return to foreground: signed in + bank linked + online, last sync > 4h ago, never overlapping (syncNow guards). Silent: status text only. */
+const AUTO_SYNC_MS = 4 * 3600e3;
+function autoSync() {
+  if (syncing || !syncOn() || !S.sync.connected || !navigator.onLine || document.visibilityState === 'hidden') return;
+  if (S.sync.lastSync && Date.now() - Date.parse(S.sync.lastSync) < AUTO_SYNC_MS) return;
+  syncNow('auto');
+}
+async function syncNow(quiet) {   // quiet: true = toast only on news; 'auto' = no toasts at all
+  if (syncing || !syncOn() || !S.sync.connected) return; syncing = true; syncMsg('Syncing…'); bankSt();
+  const loud = !quiet, news = quiet !== 'auto';
   const tot = { added: 0, matched: 0, updated: 0, removed: 0 }; const made = []; let loading = false;
   try {
     for (let i = 0; i < 20; i++) {
@@ -1184,18 +1195,18 @@ async function syncNow(quiet) {
     S.sync.lastSync = new Date().toISOString(); S.sync.loginRequired = false; save(); render();
     if (loading && !tot.added) {   // first minutes after connecting: history not ready yet; check again automatically
       syncMsg('Your bank is still sending your transactions. This can take a few minutes; we will check again automatically.');
-      if (!quiet) toast('Your bank is still sending your transactions (can take a few minutes). We will check again automatically.');
-      if (loadingTries++ < 10) setTimeout(() => syncNow(true), 60000);
+      if (loud) toast('Your bank is still sending your transactions (can take a few minutes). We will check again automatically.');
+      if (loadingTries++ < 10) setTimeout(() => syncNow(quiet === 'auto' ? 'auto' : true), 60000);
       return;
     }
     loadingTries = 0;
-    if (!quiet || tot.added || made.length || cards) toast(`Bank sync: ${tot.added} new, ${tot.matched} matched, ${tot.updated} updated, ${tot.removed} removed${cards ? ` · ${cards} card${cards === 1 ? '' : 's'} added to Debts` : ''}${payToast(made)}`);
+    if (loud || (news && (tot.added || made.length || cards))) toast(`Bank sync: ${tot.added} new, ${tot.matched} matched, ${tot.updated} updated, ${tot.removed} removed${cards ? ` · ${cards} card${cards === 1 ? '' : 's'} added to Debts` : ''}${payToast(made)}`);
   } catch (e) {
     if (e.code === 'NOT_CONNECTED') { S.sync.connected = false; save(); render(); }
     if (e.code === 'ITEM_LOGIN_REQUIRED') { S.sync.loginRequired = true; save(); render(); }
-    if (!quiet) toast(e.code === 'ITEM_LOGIN_REQUIRED' ? 'Your bank needs you to log in again. Tap "Fix bank login".' : e.message);
+    if (loud) toast(e.code === 'ITEM_LOGIN_REQUIRED' ? 'Your bank needs you to log in again. Tap "Fix bank login".' : e.message);
     syncMsg(e.message);
-  } finally { syncing = false; }
+  } finally { syncing = false; bankSt(); }
 }
 /* Upsert one Debt per bank credit card. Manual debts are never touched; a card is never duplicated. Returns # of new cards. */
 function applyCards(r) {
@@ -1483,11 +1494,10 @@ if ('serviceWorker' in navigator) {
   });
 }
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
-// Resume Plaid Link after an OAuth bank redirect, then auto-sync at most every 6 hours when connected.
+// Resume Plaid Link after an OAuth bank redirect; otherwise auto-sync on open (and on return to foreground, below), at most every 4 hours.
 if (syncOn() && /[?&]oauth_state_id=/.test(location.search) && sessionStorage.getItem('plaidLinkToken')) {
   const href = location.href; history.replaceState(null, '', location.pathname);
   openLink(sessionStorage.getItem('plaidLinkToken'), href, sessionStorage.getItem('plaidLinkMode') || 'new').catch(e => toast(e.message));
-} else if (syncOn() && S.sync.connected && navigator.onLine && (!S.sync.lastSync || Date.now() - Date.parse(S.sync.lastSync) > 6 * 3600e3)) {
-  setTimeout(() => syncNow(true), 1500);
-}
+} else setTimeout(autoSync, 1500);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') autoSync(); });
 window.__budget = { plaidCatId, isUncat, get state() { return S; }, get cloud() { return cloud; }, goalStatus, workWeeks, weekSummary, dueCheckin, detectSubs, merchKey, parseCSV, parseDate, autoCat, computePlan, debtStatus, applySync, applyCards, safeToSpend };
